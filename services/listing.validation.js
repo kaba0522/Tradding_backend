@@ -1,5 +1,6 @@
 const { AppError } = require('../lib/errors');
 const { validateUuid } = require('../lib/validators');
+const storageService = require('./storage.service');
 
 const URL_REGEX = /^https?:\/\/\S+$/i;
 const VALID_SIDES = ['SELL', 'BUY'];
@@ -82,16 +83,22 @@ function optionalEnum(value, allowedValues, fieldName) {
   return value;
 }
 
-function optionalUrlArray(value, fieldName) {
+function optionalUrlArray(value, fieldName, maxItems) {
   if (value === undefined || value === null) {
     return [];
   }
   if (!Array.isArray(value)) {
     throw new AppError(`${fieldName} must be an array of URLs`, 400);
   }
+  if (value.length > maxItems) {
+    throw new AppError(`${fieldName} can contain at most ${maxItems} items`, 400);
+  }
   return value.map((url) => {
     if (typeof url !== 'string' || !URL_REGEX.test(url)) {
       throw new AppError(`${fieldName} must contain valid http(s) URLs`, 400);
+    }
+    if (!storageService.isOwnedUrl(url)) {
+      throw new AppError(`${fieldName} must contain URLs uploaded via /media/sign`, 400);
     }
     return url;
   });
@@ -124,8 +131,8 @@ function validateSellListingInput(body) {
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
     weightKg: optionalPositiveInt(body.weightKg, 'weightKg'),
     price: optionalPositiveDecimal(body.price, 'price'),
-    photoUrls: optionalUrlArray(body.photoUrls, 'photoUrls'),
-    videoUrls: optionalUrlArray(body.videoUrls, 'videoUrls'),
+    photoUrls: optionalUrlArray(body.photoUrls, 'photoUrls', storageService.MAX_PHOTOS_PER_LISTING),
+    videoUrls: optionalUrlArray(body.videoUrls, 'videoUrls', storageService.MAX_VIDEOS_PER_LISTING),
     moisture: optionalString(body.moisture, 'moisture'),
     color: optionalString(body.color, 'color'),
     size: optionalString(body.size, 'size'),
@@ -184,10 +191,10 @@ function validateSellListingPatch(body) {
     patch.price = requirePositiveDecimal(body.price, 'price');
   }
   if (body.photoUrls !== undefined) {
-    patch.photoUrls = optionalUrlArray(body.photoUrls, 'photoUrls');
+    patch.photoUrls = optionalUrlArray(body.photoUrls, 'photoUrls', storageService.MAX_PHOTOS_PER_LISTING);
   }
   if (body.videoUrls !== undefined) {
-    patch.videoUrls = optionalUrlArray(body.videoUrls, 'videoUrls');
+    patch.videoUrls = optionalUrlArray(body.videoUrls, 'videoUrls', storageService.MAX_VIDEOS_PER_LISTING);
   }
   if (body.moisture !== undefined) {
     patch.moisture = optionalString(body.moisture, 'moisture');
