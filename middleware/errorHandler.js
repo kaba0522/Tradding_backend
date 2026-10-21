@@ -21,7 +21,13 @@ function errorHandler(err, req, res, next) {
     console.error(err);
   }
 
-  res.status(statusCode).json({ success: false, error: { code, message } });
+  const error = { code, message };
+  // Optional structured detail (e.g. per-row Excel errors); only AppErrors set it.
+  if (isAppError && err.details !== undefined) {
+    error.details = err.details;
+  }
+
+  res.status(statusCode).json({ success: false, error });
 }
 
 module.exports = errorHandler;

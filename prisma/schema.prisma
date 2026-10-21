@@ -123,13 +123,6 @@ enum TradeStatus {
   @@map("trade_status")
 }
 
-enum OriginLevel {
-  STATE
-  CITY
-
-  @@map("origin_level")
-}
-
 enum FreightStatus {
   active
   price_expired
@@ -454,7 +447,6 @@ model Trade {
 
 model FreightRoute {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  originLevel     OriginLevel   @map("origin_level")
   originName      String        @map("origin_name")
   destinationName String        @map("destination_name")
   priceLow        Decimal?      @map("price_low") @db.Decimal(12, 2)
@@ -469,6 +461,8 @@ model FreightRoute {
 
   updatedBy AppUser @relation("FreightRouteUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
 
+  // Also has a DB-only unique index on (lower(origin_name), lower(destination_name)) —
+  // uq_freight_route_origin_destination, see the freight_drop_origin_level migration.
   @@index([originName, destinationName, status], map: "ix_freight_route")
   @@map("freight_route")
 }

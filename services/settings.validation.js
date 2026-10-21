@@ -16,6 +16,14 @@ const SETTINGS_REGISTRY = {
       value !== null &&
       /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time),
   },
+  // Independent of price_expiry_time (listings) — freight routes can expire at a
+  // different time of day. Same value shape.
+  freight_expiry_time: {
+    validate: (value) =>
+      typeof value === 'object' &&
+      value !== null &&
+      /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time),
+  },
 };
 
 function validateSettingValue(key, value) {
