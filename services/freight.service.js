@@ -196,31 +196,30 @@ function serializeRoute(route, { isAdmin, now }) {
 // Read
 // ---------------------------------------------------------------------------
 
-// All routes, grouped by origin (case-insensitive) so a client can render one tab
-// per origin with its destinations underneath. Freight is a small reference table,
-// so this is intentionally not paginated.
-async function listGrouped({ origin, destination, isAdmin }) {
+// Flat, paginated list of routes (one row per route, like the freight table in the app),
+// sorted by origin then destination. `origin` / `destination` are case-insensitive
+// "contains" searches, so searching an origin returns all of its destinations, page by page.
+// The page size is bounded by `take` no matter how many routes one origin has.
+async function listRoutes({ origin, destination, isAdmin, skip = 0, take }) {
   const originFilter = buildContainsFilter(origin);
   const destinationFilter = buildContainsFilter(destination);
   const where = {};
   if (originFilter) where.originName = originFilter;
   if (destinationFilter) where.destinationName = destinationFilter;
 
-  const routes = await prisma.freightRoute.findMany({
-    where,
-    orderBy: [{ originName: 'asc' }, { destinationName: 'asc' }],
-  });
+  const [routes, total] = await Promise.all([
+    prisma.freightRoute.findMany({
+      where,
+      // id as the last key keeps the order stable between pages
+      orderBy: [{ originName: 'asc' }, { destinationName: 'asc' }, { id: 'asc' }],
+      skip,
+      take,
+    }),
+    prisma.freightRoute.count({ where }),
+  ]);
 
   const now = new Date();
-  const groups = new Map();
-  for (const route of routes) {
-    const key = route.originName.toLowerCase();
-    if (!groups.has(key)) {
-      groups.set(key, { originName: route.originName, routes: [] });
-    }
-    groups.get(key).routes.push(serializeRoute(route, { isAdmin, now }));
-  }
-  return Array.from(groups.values());
+  return { data: routes.map((route) => serializeRoute(route, { isAdmin, now })), total };
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +621,7 @@ async function commitUpload(buffer, actorUserId) {
 
 module.exports = {
   computeFreightExpiryCutoff,
-  listGrouped,
+  listRoutes,
   createRoute,
   updateRoute,
   deleteRoute,

@@ -1,15 +1,18 @@
 const freightService = require('../services/freight.service');
 const { sendSuccess } = require('../lib/response');
 const { AppError } = require('../lib/errors');
+const { parsePagination, buildMeta } = require('../lib/pagination');
 
 // Same endpoint for everyone; the server decides what each caller may see
-// (admins get the last price of expired routes, everyone else gets null).
+// (admins get the last price of expired routes, everyone else gets null). Flat list,
+// paginated by route (page / limit count routes).
 async function list(req, res, next) {
   try {
     const { origin, destination } = req.query;
     const isAdmin = req.user.roles.includes('admin');
-    const data = await freightService.listGrouped({ origin, destination, isAdmin });
-    sendSuccess(res, 200, data);
+    const { page, limit, skip, take } = parsePagination(req.query);
+    const { data, total } = await freightService.listRoutes({ origin, destination, isAdmin, skip, take });
+    sendSuccess(res, 200, data, buildMeta({ page, limit, total }));
   } catch (err) {
     next(err);
   }

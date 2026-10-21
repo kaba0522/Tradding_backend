@@ -44,7 +44,7 @@
 > **Done when:** the 7+1 admin screens exist as a navigable desktop layout, with the mobile-essential ones sensibly collapsible.
 
 ### Step 6 — Freight page + admin upload
-> **Prompt:** "Build the **Freight page** (§4.9) as the Freight tab in both apps: origin tabs (one per origin city; no state level), then a **destination → price** table, prices as ranges or single values, per quintal, with a truck-capacity note — read-only for buyers/sellers. Then in the admin panel, build the **Freight management** screen: upload freight Excel → review parsed routes → publish, plus manual add/edit of a route. Same 2 AM expiry as commodity prices."
+> **Prompt:** "Build the **Freight page** (§4.9) as the Freight tab in both apps: a flat table (**origin · destination · price per quintal · capacity**) with origin / destination search and pagination (no state level), prices as ranges or single values, per quintal, with a truck-capacity note — read-only for buyers/sellers. Then in the admin panel, build the **Freight management** screen: upload freight Excel → review parsed routes → publish, plus manual add/edit of a route. Same 2 AM expiry as commodity prices."
 > **Done when:** the Freight tab renders the state→destination→price reference view, and the admin can upload/review/publish freight routes.
 
 ### Step 7 — Profile
@@ -324,7 +324,7 @@ A **Freight page** is a top-level section of the app showing transport rates by 
 **Locked decisions:**
 - **Upload format:** **Excel/spreadsheet now; photo/OCR later** (mirrors the commodity-sheet phasing).
 - **Price format:** **range OR single value, admin's choice** — store as an optional low/high pair; a single value is `low == high`. One field design covers both.
-- **Route structure:** **origin → destination → price**, city to city (e.g. Ludhiana → Amritsar). There is **no state/city level** — `origin_level` was dropped; origin and destination are free-text names, trimmed and matched case-insensitively. One route per (origin, destination) pair (DB-unique, case-insensitive). The read API groups routes **by origin name** so the client can show one tab per origin.
+- **Route structure:** **origin → destination → price**, city to city (e.g. Ludhiana → Amritsar). There is **no state/city level** — `origin_level` was dropped; origin and destination are free-text names, trimmed and matched case-insensitively. One route per (origin, destination) pair (DB-unique, case-insensitive). The read API is a **flat, paginated list of routes** (`page`/`limit` count routes, default 20, max 100), sorted by origin then destination, with `origin` / `destination` case-insensitive search filters — it mirrors the freight table (ORIGIN · DESTINATION · PRICE / QUINTAL · CAPACITY). Searching an origin returns all of its destinations, page by page, however many there are. `npm run seed:freight` loads ~30 sample routes (safe to re-run; refreshes prices and expiry).
 - **Expiry:** freight has its **own expiry time**, setting `freight_expiry_time` (`{ "time": "HH:mm" }`, Asia/Kolkata, default 02:00), independent of listings' `price_expiry_time`. It is stamped into each route's `price_valid_until` at write time; the existing hourly expiry job flips `active` → `price_expired`. Routes are kept; non-admin reads return `null` prices for expired routes (also evaluated at read time, so job lag can't leak a stale price). Admins still see the last price.
 - **Unit:** per quintal (vs. per bag for commodities). Store the unit explicitly so the two don't get conflated.
 
