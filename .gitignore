@@ -26,3 +26,6 @@ prisma/*.db
 
 # Postman collections (local only, not pushed)
 postman/
+
+# Demo seed script (local only, not pushed)
+prisma/seed-demo.js

@@ -8,7 +8,10 @@ const ADMIN_USERS = [
 
 // Default settings, seeded only if the key doesn't already exist — never
 // overwrite a value an admin has since changed via the API.
-const DEFAULT_SETTINGS = [{ key: 'price_expiry_time', value: { time: '02:00' } }];
+const DEFAULT_SETTINGS = [
+  { key: 'price_expiry_time', value: { time: '02:00' } },
+  { key: 'freight_expiry_time', value: { time: '02:00' } },
+];
 
 async function main() {
   for (const admin of ADMIN_USERS) {

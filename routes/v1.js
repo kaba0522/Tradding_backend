@@ -12,6 +12,7 @@ var commoditiesRouter = require('./commodities');
 var settingsRouter = require('./settings');
 var listingsRouter = require('./listings');
 var usersRouter = require('./users');
+var freightRouter = require('./freight');
 
 router.use('/invites', invitesRouter);
 router.use('/auth', authRouter);
@@ -22,6 +23,7 @@ router.use('/commodities', commoditiesRouter);
 router.use('/settings', settingsRouter);
 router.use('/listings', listingsRouter);
 router.use('/users', usersRouter);
+router.use('/freight', freightRouter);
 
 router.use((req, res, next) => next(new AppError('Not found', 404)));
 router.use(errorHandler);
