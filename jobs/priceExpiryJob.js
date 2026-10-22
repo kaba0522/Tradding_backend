@@ -16,6 +16,12 @@ async function runExpiryCheck() {
 }
 
 function start() {
+  // Kill switch for testing: set PRICE_EXPIRY_JOB_ENABLED=false (e.g. on Render)
+  // to stop prices from expiring. Remove the var or set it to true to resume.
+  if (String(process.env.PRICE_EXPIRY_JOB_ENABLED).toLowerCase() === 'false') {
+    console.log('[priceExpiryJob] disabled via PRICE_EXPIRY_JOB_ENABLED=false');
+    return;
+  }
   // Catch up immediately on boot (covers any downtime), then every hour on
   // the hour. The check is time-agnostic — priceValidUntil is pre-computed
   // per row, so this doesn't need to know the admin's configured expiry time.
