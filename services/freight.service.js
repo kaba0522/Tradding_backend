@@ -165,6 +165,8 @@ function toNumberOrNull(decimal) {
 // ---------------------------------------------------------------------------
 
 function isEffectivelyExpired(route, now) {
+  // Testing kill switch (same flag as the expiry job): never treat prices as expired.
+  if (String(process.env.PRICE_EXPIRY_JOB_ENABLED).toLowerCase() === 'false') return false;
   return (
     route.status === 'price_expired' ||
     (route.priceValidUntil !== null && route.priceValidUntil <= now)
