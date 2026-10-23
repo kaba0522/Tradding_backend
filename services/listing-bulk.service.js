@@ -3,12 +3,19 @@ const stringSimilarity = require('string-similarity');
 const prisma = require('../lib/prisma');
 const { AppError } = require('../lib/errors');
 const { validateUuid } = require('../lib/validators');
-const { createListing, fetchCategoryAndCommodity, computeNextExpiryCutoff } = require('./listing.service');
+const {
+  createListing,
+  fetchCategoryAndCommodity,
+  computeNextExpiryCutoff,
+  getOwnerDefaultPaymentTerms,
+  resolvePaymentTerms,
+} = require('./listing.service');
 const {
   QUALITY_GRADES,
   optionalString,
   requirePositiveInt,
   optionalPositiveInt,
+  optionalNonNegativeInt,
   optionalPositiveDecimal,
   optionalEnum,
 } = require('./listing.validation');
@@ -166,9 +173,10 @@ async function parseUploadedWorkbook(buffer, userId) {
     throw new AppError('Uploaded file has no worksheet', 400);
   }
 
-  const [categories, commodities] = await Promise.all([
+  const [categories, commodities, userDefaultPaymentTerms] = await Promise.all([
     prisma.commodityCategory.findMany(),
     prisma.commodity.findMany(),
+    getOwnerDefaultPaymentTerms(userId),
   ]);
 
   const rows = [];
@@ -214,7 +222,8 @@ async function parseUploadedWorkbook(buffer, userId) {
     const quantityBags = tryValidate(errors, () => requirePositiveInt(raw.quantityBags, 'quantityBags'));
     const weightKg = tryValidate(errors, () => optionalPositiveInt(raw.weightKg, 'weightKg'));
     const price = tryValidate(errors, () => optionalPositiveDecimal(raw.price, 'price'));
-    const paymentTerms = tryValidate(errors, () => optionalPositiveInt(raw.paymentTerms, 'paymentTerms'));
+    // undefined => the cell was invalid (error already recorded); null => blank cell.
+    const paymentTerms = tryValidate(errors, () => optionalNonNegativeInt(raw.paymentTerms, 'paymentTerms'));
     const notes = tryValidate(errors, () => optionalString(raw.notes, 'notes'));
     const moisture = tryValidate(errors, () => optionalString(raw.moisture, 'moisture'));
     const color = tryValidate(errors, () => optionalString(raw.color, 'color'));
@@ -223,6 +232,7 @@ async function parseUploadedWorkbook(buffer, userId) {
     const commodityRecord = commodityMatch.id ? commodities.find((c) => c.id === commodityMatch.id) : null;
 
     let willUpdateExisting = null;
+    let existingPaymentTerms = null;
     if (categoryMatch.id && commodityMatch.id && errors.length === 0) {
       const existing = await prisma.listing.findFirst({
         where: {
@@ -234,9 +244,29 @@ async function parseUploadedWorkbook(buffer, userId) {
           quality: quality ?? null,
           status: { in: LIVE_STATUSES },
         },
-        select: { id: true },
+        select: { id: true, paymentTerms: true },
       });
       willUpdateExisting = existing ? existing.id : null;
+      existingPaymentTerms = existing ? existing.paymentTerms : null;
+    }
+
+    // Same precedence as bulkConfirmRows: the row's own value, else (blank cell on a
+    // listing that will be updated) the listing's current value, else the profile default.
+    let effectivePaymentTerms = null;
+    let paymentTermsSource = null;
+    if (paymentTerms !== undefined) {
+      if (paymentTerms !== null) {
+        effectivePaymentTerms = paymentTerms;
+        paymentTermsSource = 'row';
+      } else if (existingPaymentTerms !== null) {
+        effectivePaymentTerms = existingPaymentTerms;
+        paymentTermsSource = 'existing_listing';
+      } else if (userDefaultPaymentTerms !== null) {
+        effectivePaymentTerms = userDefaultPaymentTerms;
+        paymentTermsSource = 'profile_default';
+      } else {
+        errors.push('paymentTerms missing — enter it in the sheet or set default payment terms in your profile');
+      }
     }
 
     const ready = errors.length === 0 && Boolean(categoryMatch.id) && Boolean(commodityMatch.id);
@@ -259,7 +289,8 @@ async function parseUploadedWorkbook(buffer, userId) {
         quantityBags: quantityBags ?? null,
         weightKg: weightKg ?? null,
         price: price ?? null,
-        paymentTerms: paymentTerms ?? null,
+        paymentTerms: effectivePaymentTerms,
+        paymentTermsSource,
         notes: notes ?? null,
         moisture: moisture ?? null,
         color: color ?? null,
@@ -285,6 +316,7 @@ async function bulkConfirmRows(userId, rows) {
   const created = [];
   const updated = [];
   const failed = [];
+  const userDefaultPaymentTerms = await getOwnerDefaultPaymentTerms(userId);
 
   for (const row of rows) {
     const rowIndex = row.rowIndex;
@@ -299,7 +331,7 @@ async function bulkConfirmRows(userId, rows) {
       const quantityBags = requirePositiveInt(row.quantityBags, 'quantityBags');
       const weightKg = optionalPositiveInt(row.weightKg, 'weightKg');
       const price = optionalPositiveDecimal(row.price, 'price');
-      const paymentTerms = optionalPositiveInt(row.paymentTerms, 'paymentTerms');
+      const paymentTerms = optionalNonNegativeInt(row.paymentTerms, 'paymentTerms');
       const notes = optionalString(row.notes, 'notes');
       const moisture = optionalString(row.moisture, 'moisture');
       const color = optionalString(row.color, 'color');
@@ -321,7 +353,8 @@ async function bulkConfirmRows(userId, rows) {
         const data = {
           quantityBags,
           availabilityBags: quantityBags,
-          paymentTerms,
+          // Blank cell keeps the listing's current terms (was: overwritten with null).
+          paymentTerms: resolvePaymentTerms(paymentTerms ?? existing.paymentTerms, userDefaultPaymentTerms),
           notes,
           moisture,
           color,
@@ -345,7 +378,7 @@ async function bulkConfirmRows(userId, rows) {
         quantityBags,
         weightKg,
         price,
-        paymentTerms,
+        paymentTerms: resolvePaymentTerms(paymentTerms, userDefaultPaymentTerms),
         notes,
         moisture,
         color,
