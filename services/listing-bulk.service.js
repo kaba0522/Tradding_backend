@@ -104,6 +104,17 @@ async function generateTemplateWorkbook() {
   commodities.forEach((c, i) => {
     listsSheet.getCell(i + 1, 2).value = c.name;
   });
+  // Dependent dropdown: column (3 + i) holds only category i's commodities, exposed as
+  // the defined name `cat_<i+1>`. The Commodity cell then does INDIRECT("cat_"&MATCH(...)),
+  // so names with spaces/symbols never need sanitizing.
+  categories.forEach((cat, i) => {
+    const names = commodities.filter((c) => c.categoryId === cat.id).map((c) => c.name);
+    names.forEach((name, j) => {
+      listsSheet.getCell(j + 1, 3 + i).value = name;
+    });
+    const col = listsSheet.getColumn(3 + i).letter;
+    workbook.definedNames.add(`_lists!$${col}$1:$${col}$${Math.max(names.length, 1)}`, `cat_${i + 1}`);
+  });
   // Belt-and-suspenders: if some viewer ignores the hidden state and shows this
   // sheet anyway, sheet protection still stops the dropdown source values from
   // being edited (all cells are locked by default; protecting the sheet enforces it).
@@ -127,7 +138,6 @@ async function generateTemplateWorkbook() {
   sheet.columns = COLUMNS;
 
   const categoryRange = `_lists!$A$1:$A$${Math.max(categories.length, 1)}`;
-  const commodityRange = `_lists!$B$1:$B$${Math.max(commodities.length, 1)}`;
   const qualityInline = `"${QUALITY_GRADES.join(',')}"`;
 
   for (let row = 2; row <= TEMPLATE_DATA_ROWS + 1; row += 1) {
@@ -142,10 +152,10 @@ async function generateTemplateWorkbook() {
     sheet.getCell(`B${row}`).dataValidation = {
       type: 'list',
       allowBlank: false,
-      formulae: [commodityRange],
+      formulae: [`INDIRECT("cat_"&MATCH($A${row},${categoryRange},0))`],
       showErrorMessage: true,
       errorTitle: 'Invalid commodity',
-      error: 'Please pick a commodity from the dropdown list.',
+      error: 'Please pick a category first, then a commodity from the dropdown list.',
     };
     sheet.getCell(`C${row}`).dataValidation = {
       type: 'list',
