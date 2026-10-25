@@ -28,7 +28,7 @@
 > **Done when:** both apps show the same 4-tab bar, Browse lands by default, and the buyer/seller labels differ correctly (Post Requirement vs Add Listing).
 
 ### Step 2 — Buyer Post Requirement flow + seller-browses-requirements (the biggest gap)
-> **Prompt:** "Build the two-sided marketplace from §4.3. (a) In the Buyer app, build the **Post Requirement** flow: buyer enters commodity/category, item, quality, target price, quantity (bags), optional notes → posts a buy requirement. Show the buyer's own posted requirements somewhere they can manage them. (b) In the Seller app, build the **Browse → buy requirements** view: sellers see buy requirements they can act on, with a way to open one and start contact. Use the same real seed commodities. Keep buy requirement and sell listing visually consistent — they're the same shape with opposite `side`."
+> **Prompt:** "Build the two-sided marketplace from §4.3. (a) In the Buyer app, build the **Post Requirement** flow: buyer enters commodity/category, item, quantity (bags) — **no price field** (a requirement never has a price, see §4.3) —  → posts a buy requirement. Show the buyer's own posted requirements somewhere they can manage them. (b) In the Seller app, build the **Browse → buy requirements** view: sellers see buy requirements they can act on, with a way to open one and start contact. Use the same real seed commodities. Keep buy requirement and sell listing visually consistent — they're the same shape with opposite `side`."
 > **Done when:** a buyer can post a requirement and see it; a seller can browse buy requirements and open one.
 
 ### Step 3 — Direct negotiation (eBay-style) + Trades tab
@@ -89,7 +89,7 @@ He already has a trusted network of buyers and sellers to bootstrap with. **This
 | Role | Description |
 |------|-------------|
 | **Seller** | Lists commodities they want to sell (with quality & price). Can negotiate, bulk-edit prices, set payment terms. |
-| **Buyer** | Posts buying requirements (commodity, quality, target price). Can negotiate. |
+| **Buyer** | Posts buying requirements (commodity, quantity — no price). Can negotiate. |
 | **Broker** | Earns brokerage on a completed trade. The father is the first/primary broker. **Multiple brokers can exist.** A trade records which broker facilitated it (or "self" if none). |
 | **Admin** | Platform operator (initially also the father). Invites users, views all listings & completed trades, edits listings/prices on behalf of users who call in, controls global settings (e.g., price expiry time). |
 
@@ -164,7 +164,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 4. **Bulk edit:** Seller can apply a delta (e.g., **+50 / −50**) to **all** listings or to **selected** listings at once. Support both absolute set and relative delta.
 
 ### 4.3 Buyer
-1. **Requirements as visible listings:** Buyer posts what they want to buy — commodity, quality, target buying price, (and quantity — see §10). This **buy requirement is itself a listing (`side=BUY`) that sellers can browse and act on** — not just a private note. Sellers can discover matching buy requirements and **contact the buyer / initiate a negotiation**.
+1. **Requirements as visible listings:** Buyer posts what they want to buy — commodity and quantity (bags). **LOCKED: a buy requirement has NO price and therefore never expires** — price is agreed only in negotiation (the API rejects `price` on BUY with 400, `minPrice/maxPrice` filters on BUY browse with 400, and a DB CHECK `ck_listing_buy_no_price` enforces `price`/`price_valid_until` NULL for BUY; bulk price edits and the 2 AM expiry job are SELL-only). This **buy requirement is itself a listing (`side=BUY`) that sellers can browse and act on** — not just a private note. Sellers can discover matching buy requirements and **contact the buyer / initiate a negotiation**.
 2. **Two-sided discovery (both lanes):** The marketplace is genuinely two-sided and symmetric:
    - Buyers browse **sell listings** (supply) and can initiate contact with a seller.
    - Sellers browse **buy requirements** (demand) and can initiate contact with a buyer.
@@ -258,7 +258,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 | **Moisture** | Optional |
 | **Color** | Optional (note: color is often already embedded in the name — Pila=yellow, Lal=red, Hara=green, Nila=blue) |
 | **Size** | Optional |
-| **Payment terms** | Set at **seller/firm level** (applies to all their listings) with **per-listing override**. Real sheet carries firm-level terms in the header (see §4.7). |
+| **Payment terms** | Integer **days**, `>= 0` (`0` = immediate payment). Set at **seller/firm level** (`app_user.default_payment_terms`) with **per-listing override**. **Copy-at-save:** on create/update, a SELL listing with no `paymentTerms` gets the owner's profile default copied into `listing.payment_terms`; if neither exists the write is rejected (400). A seller cannot clear their profile default. Explicit `paymentTerms: null` on PATCH = "re-apply my default". Excel bulk: blank cell → keep the listing's current value, else the profile default. Price-only bulk edits never touch it. Real sheet carries firm-level terms in the header (see §4.7). |
 
 ### 4.7 Real Sample Price Sheets — Ground Truth (from founder's actual data)
 
@@ -384,7 +384,7 @@ The profile is the user's identity + settings hub, and the **home for completed 
 A negotiation is a **thread between one buyer and one seller on one listing** (a sell listing or a buy requirement), consisting of a sequence of offers. Direct between the two parties — the broker is **not** a party (but can watch/nudge, see below).
 
 ### 5.1 Core flow
-- A listing has a **listed price** (seller's ask, or buyer's bid on a buy requirement).
+- A sell listing has a **listed price** (the seller's ask). A buy requirement has **no price**, so on a requirement the first offer comes from the seller.
 - A party opens a negotiation and makes an **offer**. The counterparty can **Accept**, **Decline**, or **Counter** with a new price.
 - **Deal is done only when both parties have explicitly accepted the same price.** Accept → **trade-accept + broker-capture screen** (§4.6) → confirmed trade. No silent auto-commit.
 

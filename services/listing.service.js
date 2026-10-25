@@ -7,6 +7,7 @@ const {
   validateListingCreateInput,
   validateListingUpdateInput,
   requirePositiveDecimal,
+  requirePositiveInt,
 } = require('./listing.validation');
 
 const VALID_SIDES = ['SELL', 'BUY'];
@@ -64,11 +65,42 @@ async function fetchCategoryAndCommodity(categoryId, commodityId) {
   return commodity;
 }
 
+async function getOwnerDefaultPaymentTerms(userId) {
+  const owner = await prisma.appUser.findUnique({
+    where: { id: userId },
+    select: { defaultPaymentTerms: true },
+  });
+  return owner ? owner.defaultPaymentTerms : null;
+}
+
+// Copy-at-save: a SELL listing stores its own payment terms. If the listing
+// doesn't specify one, the owner's profile default is copied in; if neither
+// exists the write is rejected. 0 is a valid value (immediate payment), so
+// this must compare against null, never use truthiness.
+function resolvePaymentTerms(listingValue, userDefault) {
+  const resolved = listingValue ?? userDefault ?? null;
+  if (resolved === null) {
+    throw new AppError(
+      'paymentTerms is required: set it on the listing or set default payment terms in your profile',
+      400
+    );
+  }
+  return resolved;
+}
+
 async function createListing(userId, body) {
   const input = validateListingCreateInput(body);
   const commodity = await fetchCategoryAndCommodity(input.categoryId, input.commodityId);
 
-  const hasPrice = input.price !== null;
+  let paymentTerms = null;
+  if (input.side === 'SELL') {
+    const userDefault = input.paymentTerms === null ? await getOwnerDefaultPaymentTerms(userId) : null;
+    paymentTerms = resolvePaymentTerms(input.paymentTerms, userDefault);
+  }
+
+  // Only SELL listings carry a price (and therefore an expiry). A BUY requirement
+  // has no price at all, so it has nothing to expire.
+  const hasPrice = input.side === 'SELL' && input.price !== null;
   const priceValidUntil = hasPrice ? await computeNextExpiryCutoff() : null;
 
   // itemName is never client input on either side — commodityId already identifies
@@ -83,10 +115,8 @@ async function createListing(userId, body) {
           itemName: commodity.name,
           quantityBags: input.quantityBags,
           availabilityBags: input.quantityBags,
-          price: input.price,
           currency: 'INR',
           status: 'active',
-          priceValidUntil,
         }
       : {
           side: 'SELL',
@@ -105,7 +135,7 @@ async function createListing(userId, body) {
           moisture: input.moisture,
           color: input.color,
           size: input.size,
-          paymentTerms: input.paymentTerms,
+          paymentTerms,
           notes: input.notes,
           status: hasPrice ? 'active' : 'na',
           priceValidUntil,
@@ -159,6 +189,9 @@ async function getListings({
 }) {
   if (!VALID_SIDES.includes(side)) {
     throw new AppError(`side is required and must be one of: ${VALID_SIDES.join(', ')}`, 400);
+  }
+  if (side === 'BUY' && (minPrice !== undefined || maxPrice !== undefined)) {
+    throw new AppError('minPrice/maxPrice are not supported for buy requirements (they have no price)', 400);
   }
   if (categoryId !== undefined) {
     validateUuid(categoryId, 'categoryId');
@@ -276,7 +309,25 @@ async function updateListing(id, userId, body) {
     patch.itemName = commodity.name;
   }
 
+  if (existing.side === 'SELL') {
+    if (patch.paymentTerms === null) {
+      // Explicit "use my default" — must resolve, else reject.
+      patch.paymentTerms = resolvePaymentTerms(null, await getOwnerDefaultPaymentTerms(userId));
+    } else if (patch.paymentTerms === undefined && existing.paymentTerms === null) {
+      // Legacy listing with no terms: self-heal from the profile default if there is
+      // one, but never block an unrelated edit (e.g. a price change) if there isn't.
+      const userDefault = await getOwnerDefaultPaymentTerms(userId);
+      if (userDefault !== null) {
+        patch.paymentTerms = userDefault;
+      }
+    }
+  }
+
   const data = { ...patch };
+  if (patch.quantityBags !== undefined) {
+    // Same as create / Excel: availability follows the quantity the owner sets.
+    data.availabilityBags = patch.quantityBags;
+  }
   if (patch.price !== undefined) {
     data.status = 'active';
     data.priceValidUntil = await computeNextExpiryCutoff();
@@ -311,15 +362,26 @@ async function bulkUpdatePrice(userId, body) {
   return mode === 'delta' ? bulkDeltaPrice(userId, body) : bulkSetManyPrice(userId, body);
 }
 
+// Each item is { id, price?, quantityBags? } with at least one of the two. A price
+// revives the listing (status active + fresh expiry); a quantity-only change leaves
+// status and expiry alone. Quantity always moves availability with it.
 async function applyBulkPriceUpdates(toUpdate) {
-  const priceValidUntil = toUpdate.length ? await computeNextExpiryCutoff() : null;
+  const anyPrice = toUpdate.some(({ price }) => price !== undefined);
+  const priceValidUntil = anyPrice ? await computeNextExpiryCutoff() : null;
   const updated = await prisma.$transaction(
-    toUpdate.map(({ id, price }) =>
-      prisma.listing.update({
-        where: { id },
-        data: { price, status: 'active', priceValidUntil },
-      })
-    )
+    toUpdate.map(({ id, price, quantityBags }) => {
+      const data = {};
+      if (price !== undefined) {
+        data.price = price;
+        data.status = 'active';
+        data.priceValidUntil = priceValidUntil;
+      }
+      if (quantityBags !== undefined) {
+        data.quantityBags = quantityBags;
+        data.availabilityBags = quantityBags;
+      }
+      return prisma.listing.update({ where: { id }, data });
+    })
   );
   return updated.map(serializeListing);
 }
@@ -343,7 +405,7 @@ async function bulkDeltaPrice(userId, { listingIds, value }) {
     // attempt — the actual price math happens atomically per-row below, so a
     // stale read here can never cause a lost update.
     const candidates = await prisma.listing.findMany({
-      where: { userId, status: { in: EDITABLE_STATUSES } },
+      where: { userId, side: 'SELL', status: { in: EDITABLE_STATUSES } },
       select: { id: true },
     });
     idsToProcess = candidates.map((c) => c.id);
@@ -365,6 +427,7 @@ async function bulkDeltaPrice(userId, { listingIds, value }) {
           price_valid_until = ${priceValidUntil}
       WHERE id = ${id}::uuid
         AND user_id = ${userId}::uuid
+        AND side = 'SELL'
         AND status IN ('active', 'price_expired')
         AND price IS NOT NULL
         AND (price + ${numericValue}) > 0
@@ -373,7 +436,12 @@ async function bulkDeltaPrice(userId, { listingIds, value }) {
 
     if (applied.length === 0) {
       const current = await prisma.listing.findUnique({ where: { id } });
-      if (!current || current.userId !== userId || !EDITABLE_STATUSES.includes(current.status)) {
+      if (
+        !current ||
+        current.userId !== userId ||
+        current.side !== 'SELL' ||
+        !EDITABLE_STATUSES.includes(current.status)
+      ) {
         skipped.push({ id, reason: 'not_editable' });
       } else if (current.price === null) {
         skipped.push({ id, reason: 'no_prior_price' });
@@ -395,17 +463,28 @@ async function bulkSetManyPrice(userId, { updates }) {
     throw new AppError('updates must be a non-empty array', 400);
   }
 
-  // Last entry wins if the same listingId appears more than once.
-  const priceById = new Map();
+  // Each entry is { listingId, price?, quantityBags? } — at least one of the two.
+  // If the same listingId appears more than once, later entries override the
+  // fields they provide (fields they omit keep the earlier entry's value).
+  const changesById = new Map();
   for (const entry of updates) {
     const id = validateUuid(entry && entry.listingId, 'listingId');
-    const price = requirePositiveDecimal(entry && entry.price, 'price');
-    priceById.set(id, price);
+    if (entry.price === undefined && entry.quantityBags === undefined) {
+      throw new AppError('each update needs price and/or quantityBags', 400);
+    }
+    const change = changesById.get(id) || {};
+    if (entry.price !== undefined) {
+      change.price = requirePositiveDecimal(entry.price, 'price');
+    }
+    if (entry.quantityBags !== undefined) {
+      change.quantityBags = requirePositiveInt(entry.quantityBags, 'quantityBags');
+    }
+    changesById.set(id, change);
   }
 
-  const ids = Array.from(priceById.keys());
+  const ids = Array.from(changesById.keys());
   const listings = await prisma.listing.findMany({
-    where: { id: { in: ids }, userId, status: { in: EDITABLE_STATUSES } },
+    where: { id: { in: ids }, userId, side: 'SELL', status: { in: EDITABLE_STATUSES } },
   });
   const listingById = new Map(listings.map((listing) => [listing.id, listing]));
 
@@ -417,7 +496,7 @@ async function bulkSetManyPrice(userId, { updates }) {
       skipped.push({ id, reason: 'not_editable' });
       continue;
     }
-    toUpdate.push({ id, price: priceById.get(id) });
+    toUpdate.push({ id, ...changesById.get(id) });
   }
 
   const updated = await applyBulkPriceUpdates(toUpdate);
@@ -457,4 +536,6 @@ module.exports = {
   computeNextExpiryCutoff,
   // Exported for reuse by listing-bulk.service.js.
   fetchCategoryAndCommodity,
+  getOwnerDefaultPaymentTerms,
+  resolvePaymentTerms,
 };

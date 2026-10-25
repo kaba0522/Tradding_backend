@@ -17,6 +17,15 @@ async function getOwnProfile(userId) {
 async function updateOwnProfile(userId, body) {
   const data = buildProfileUpdateData(body);
 
+  // A seller's default payment terms is the fallback every new listing copies from,
+  // so it can be changed (0 included) but never cleared.
+  if (data.defaultPaymentTerms === null) {
+    const current = await prisma.appUser.findUnique({ where: { id: userId }, select: { roles: true } });
+    if (current && current.roles.includes('seller')) {
+      throw new AppError('defaultPaymentTerms cannot be cleared for a seller', 400);
+    }
+  }
+
   const user = await prisma.appUser.update({
     where: { id: userId },
     data,

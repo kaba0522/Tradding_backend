@@ -8,7 +8,10 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "seed": "node prisma/seed.js",
-    "seed:freight": "node prisma/seed-freight.js"
+    "seed:freight": "node prisma/seed-freight.js",
+    "seed:payment-terms": "node prisma/seed-payment-terms.js",
+    "reactivate:expired": "node prisma/reactivate-expired.js",
+    "backfill:payment-terms": "node prisma/backfill-listing-payment-terms.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

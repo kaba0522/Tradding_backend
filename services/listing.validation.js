@@ -49,6 +49,26 @@ function optionalPositiveInt(value, fieldName) {
   return requirePositiveInt(value, fieldName);
 }
 
+// For fields where 0 is a real value (e.g. paymentTerms: 0 = immediate payment).
+// Blank inputs (undefined / null / '' / whitespace — an empty Excel or form cell)
+// mean "not provided" => null; they must NOT coerce to 0 via Number('').
+function optionalNonNegativeInt(value, fieldName) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === 'string' && value.trim() === '') {
+    return null;
+  }
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    throw new AppError(`${fieldName} must be a non-negative integer`, 400);
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new AppError(`${fieldName} must be a non-negative integer`, 400);
+  }
+  return parsed;
+}
+
 // CREATE-only: price is legitimately absent ("shell" listing / "open to offers").
 function optionalPositiveDecimal(value, fieldName) {
   if (value === undefined || value === null) {
@@ -104,12 +124,21 @@ function validateListingIdentity(body) {
   };
 }
 
-// side = BUY (create): deliberately minimal — only 4 real client inputs.
+// A buy requirement never carries a price (and so never expires) — the price is
+// agreed in negotiation. Sending one is a client bug, so reject loudly instead of
+// silently dropping it. `null` is accepted: it says the same thing as omitting it.
+function rejectBuyPrice(body) {
+  if (body.price !== undefined && body.price !== null) {
+    throw new AppError('price is not allowed on a buy requirement', 400);
+  }
+}
+
+// side = BUY (create): deliberately minimal — only 3 real client inputs.
 // Everything else on the row is server-derived (see listing.service.js).
 function validateBuyRequirementInput(body) {
+  rejectBuyPrice(body);
   return {
     ...validateListingIdentity(body),
-    price: optionalPositiveDecimal(body.price, 'price'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
   };
 }
@@ -129,7 +158,7 @@ function validateSellListingInput(body) {
     moisture: optionalString(body.moisture, 'moisture'),
     color: optionalString(body.color, 'color'),
     size: optionalString(body.size, 'size'),
-    paymentTerms: optionalPositiveInt(body.paymentTerms, 'paymentTerms'),
+    paymentTerms: optionalNonNegativeInt(body.paymentTerms, 'paymentTerms'),
     notes: optionalString(body.notes, 'notes'),
   };
 }
@@ -147,15 +176,13 @@ function validateListingCreateInput(body) {
 // PATCH: same per-field rules, but every field is optional and `side` is
 // immutable — the existing row's side is passed in, never read from the body.
 function validateBuyRequirementPatch(body) {
+  rejectBuyPrice(body);
   const patch = {};
   if (body.categoryId !== undefined) {
     patch.categoryId = validateUuid(body.categoryId, 'categoryId');
   }
   if (body.commodityId !== undefined) {
     patch.commodityId = validateUuid(body.commodityId, 'commodityId');
-  }
-  if (body.price !== undefined) {
-    patch.price = requirePositiveDecimal(body.price, 'price');
   }
   if (body.quantityBags !== undefined) {
     patch.quantityBags = requirePositiveInt(body.quantityBags, 'quantityBags');
@@ -199,7 +226,8 @@ function validateSellListingPatch(body) {
     patch.size = optionalString(body.size, 'size');
   }
   if (body.paymentTerms !== undefined) {
-    patch.paymentTerms = optionalPositiveInt(body.paymentTerms, 'paymentTerms');
+    // null (or blank) => "use my profile default" — resolved in listing.service.js.
+    patch.paymentTerms = optionalNonNegativeInt(body.paymentTerms, 'paymentTerms');
   }
   if (body.notes !== undefined) {
     patch.notes = optionalString(body.notes, 'notes');
@@ -225,6 +253,7 @@ module.exports = {
   optionalString,
   requirePositiveInt,
   optionalPositiveInt,
+  optionalNonNegativeInt,
   optionalPositiveDecimal,
   // Exported for reuse by listing.service.js's bulk "set-many" mode — each
   // {listingId, price} entry needs the same sticky-price rule as a single PATCH.
