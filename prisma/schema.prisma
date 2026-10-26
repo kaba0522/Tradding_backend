@@ -137,6 +137,16 @@ enum SourceKind {
   @@map("source_kind")
 }
 
+// How a broker's default brokerage is computed. The commission model is still an
+// open question (CLAUDE.md §10 #4), so it is optional on Broker.
+enum CommissionType {
+  percent // % of trade value
+  per_bag // ₹ per bag
+  flat // ₹ per trade
+
+  @@map("commission_type")
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -182,7 +192,8 @@ model AppUser {
   offers                 Offer[]                 @relation("OfferByUser")
   buyerRequirements      BuyerRequirement[]      @relation("BuyerRequirementBuyer")
   recentlyViewedListings RecentlyViewedListing[] @relation("RecentlyViewedListingBuyer")
-  brokerProfiles         Broker[]                @relation("BrokerUser")
+  brokersCreated         Broker[]                @relation("BrokerCreatedBy")
+  brokersUpdated         Broker[]                @relation("BrokerUpdatedBy")
   tradesAsBuyer          Trade[]                 @relation("TradeBuyer")
   tradesAsSeller         Trade[]                 @relation("TradeSeller")
   tradesCancelled        Trade[]                 @relation("TradeCancelledByAdmin")
@@ -398,15 +409,28 @@ model RecentlyViewedListing {
 // Trade
 // ---------------------------------------------------------------------------
 
+// Admin-managed broker list (the finite dropdown on the trade-accept screen, §4.6).
+// Never hard-deleted: Trade.broker is ON DELETE SET NULL, so a delete would silently
+// erase brokerage attribution from past trades — `active = false` instead.
 model Broker {
-  id     String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId String? @map("user_id") @db.Uuid
-  name   String
-  active Boolean @default(true)
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name           String
+  phone          String          @unique
+  commissionType CommissionType? @map("commission_type")
+  commissionRate Decimal?        @map("commission_rate") @db.Decimal(10, 2)
+  active         Boolean         @default(true)
+  createdById    String          @map("created_by") @db.Uuid
+  updatedById    String?         @map("updated_by") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  user   AppUser? @relation("BrokerUser", fields: [userId], references: [id], onDelete: SetNull)
-  trades Trade[]
+  createdBy AppUser  @relation("BrokerCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy AppUser? @relation("BrokerUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  trades    Trade[]
 
+  // CHECK ck_broker_commission (type and rate set together; rate >= 0; percent <= 100)
+  // added via raw SQL in the broker_crud migration.
+  @@index([active, name], map: "ix_broker_active_name")
   @@map("broker")
 }
 
