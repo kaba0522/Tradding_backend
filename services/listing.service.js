@@ -6,7 +6,7 @@ const { buildContainsFilter, buildDateRangeFilter, buildNumberRangeFilter } = re
 const {
   validateListingCreateInput,
   validateListingUpdateInput,
-  requirePositiveDecimal,
+  requireNonNegativeDecimal,
   requirePositiveInt,
 } = require('./listing.validation');
 
@@ -14,6 +14,12 @@ const VALID_SIDES = ['SELL', 'BUY'];
 const VALID_STATUSES = ['active', 'price_expired', 'na', 'withdrawn', 'traded'];
 const DEFAULT_STATUSES = ['active'];
 const EDITABLE_STATUSES = ['active', 'price_expired'];
+// set-many may also re-price an `na` row (price was cleared with 0). Delta must
+// not: an `na` row has no price to shift.
+const SET_MANY_STATUSES = [...EDITABLE_STATUSES, 'na'];
+
+// price 0 = "clear the price": same shape as a listing created without a price.
+const NA_PRICE_FIELDS = { price: null, status: 'na', priceValidUntil: null };
 const BULK_MODES = ['delta', 'set-many'];
 
 // Asia/Kolkata is a fixed UTC+5:30 offset year-round (no DST), so the cutoff
@@ -328,7 +334,9 @@ async function updateListing(id, userId, body) {
     // Same as create / Excel: availability follows the quantity the owner sets.
     data.availabilityBags = patch.quantityBags;
   }
-  if (patch.price !== undefined) {
+  if (patch.price === 0) {
+    Object.assign(data, NA_PRICE_FIELDS);
+  } else if (patch.price !== undefined) {
     data.status = 'active';
     data.priceValidUntil = await computeNextExpiryCutoff();
   }
@@ -371,7 +379,9 @@ async function applyBulkPriceUpdates(toUpdate) {
   const updated = await prisma.$transaction(
     toUpdate.map(({ id, price, quantityBags }) => {
       const data = {};
-      if (price !== undefined) {
+      if (price === 0) {
+        Object.assign(data, NA_PRICE_FIELDS);
+      } else if (price !== undefined) {
         data.price = price;
         data.status = 'active';
         data.priceValidUntil = priceValidUntil;
@@ -474,7 +484,7 @@ async function bulkSetManyPrice(userId, { updates }) {
     }
     const change = changesById.get(id) || {};
     if (entry.price !== undefined) {
-      change.price = requirePositiveDecimal(entry.price, 'price');
+      change.price = requireNonNegativeDecimal(entry.price, 'price');
     }
     if (entry.quantityBags !== undefined) {
       change.quantityBags = requirePositiveInt(entry.quantityBags, 'quantityBags');
@@ -484,7 +494,7 @@ async function bulkSetManyPrice(userId, { updates }) {
 
   const ids = Array.from(changesById.keys());
   const listings = await prisma.listing.findMany({
-    where: { id: { in: ids }, userId, side: 'SELL', status: { in: EDITABLE_STATUSES } },
+    where: { id: { in: ids }, userId, side: 'SELL', status: { in: SET_MANY_STATUSES } },
   });
   const listingById = new Map(listings.map((listing) => [listing.id, listing]));
 

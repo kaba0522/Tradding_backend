@@ -16,7 +16,7 @@ const {
   requirePositiveInt,
   optionalPositiveInt,
   optionalNonNegativeInt,
-  optionalPositiveDecimal,
+  optionalNonNegativeDecimal,
   optionalEnum,
 } = require('./listing.validation');
 
@@ -231,7 +231,8 @@ async function parseUploadedWorkbook(buffer, userId) {
     const quality = tryValidate(errors, () => optionalEnum(raw.quality, QUALITY_GRADES, 'quality'));
     const quantityBags = tryValidate(errors, () => requirePositiveInt(raw.quantityBags, 'quantityBags'));
     const weightKg = tryValidate(errors, () => optionalPositiveInt(raw.weightKg, 'weightKg'));
-    const price = tryValidate(errors, () => optionalPositiveDecimal(raw.price, 'price'));
+    // blank => null (no price given); 0 => explicit "clear the price" (row goes `na`).
+    const price = tryValidate(errors, () => optionalNonNegativeDecimal(raw.price, 'price'));
     // undefined => the cell was invalid (error already recorded); null => blank cell.
     const paymentTerms = tryValidate(errors, () => optionalNonNegativeInt(raw.paymentTerms, 'paymentTerms'));
     const notes = tryValidate(errors, () => optionalString(raw.notes, 'notes'));
@@ -340,7 +341,7 @@ async function bulkConfirmRows(userId, rows) {
       const quality = optionalEnum(row.quality, QUALITY_GRADES, 'quality');
       const quantityBags = requirePositiveInt(row.quantityBags, 'quantityBags');
       const weightKg = optionalPositiveInt(row.weightKg, 'weightKg');
-      const price = optionalPositiveDecimal(row.price, 'price');
+      const price = optionalNonNegativeDecimal(row.price, 'price');
       const paymentTerms = optionalNonNegativeInt(row.paymentTerms, 'paymentTerms');
       const notes = optionalString(row.notes, 'notes');
       const moisture = optionalString(row.moisture, 'moisture');
@@ -370,7 +371,12 @@ async function bulkConfirmRows(userId, rows) {
           color,
           size,
         };
-        if (price !== null) {
+        if (price === 0) {
+          // Explicit 0 clears the price; a blank cell (null) leaves it alone.
+          data.price = null;
+          data.status = 'na';
+          data.priceValidUntil = null;
+        } else if (price !== null) {
           data.price = price;
           data.status = 'active';
           data.priceValidUntil = await computeNextExpiryCutoff();
@@ -387,7 +393,8 @@ async function bulkConfirmRows(userId, rows) {
         quality,
         quantityBags,
         weightKg,
-        price,
+        // 0 on a new row = no price => createListing makes it `na`.
+        price: price === 0 ? null : price,
         paymentTerms: resolvePaymentTerms(paymentTerms, userDefaultPaymentTerms),
         notes,
         moisture,
