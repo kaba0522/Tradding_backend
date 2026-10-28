@@ -5,6 +5,7 @@ var { authenticate, requireTosAccepted } = require('../middleware/auth');
 var { AppError } = require('../lib/errors');
 var listingController = require('../controllers/listing.controller');
 var listingBulkController = require('../controllers/listing-bulk.controller');
+var listingMedia = require('../middleware/listingMedia');
 
 var upload = multer({
   storage: multer.memoryStorage(),
@@ -40,6 +41,10 @@ function handleBulkUploadFile(req, res, next) {
 }
 
 router.use(authenticate, requireTosAccepted);
+
+// Photo/video rules run before the existing create/update handlers (added, not edited).
+router.post('/', listingMedia.guardCreate);
+router.patch('/:id', listingMedia.guardUpdate);
 
 router.post('/', listingController.create);
 router.get('/', listingController.list);
