@@ -114,6 +114,14 @@ function optionalEnum(value, allowedValues, fieldName) {
   return value;
 }
 
+// Unlike optionalEnum, a missing/null value is rejected (quality on SELL listings).
+function requireEnum(value, allowedValues, fieldName) {
+  if (value === undefined || value === null || value === '') {
+    throw new AppError(`${fieldName} is required and must be one of: ${allowedValues.join(', ')}`, 400);
+  }
+  return optionalEnum(value, allowedValues, fieldName);
+}
+
 function optionalUrlArray(value, fieldName) {
   if (value === undefined || value === null) {
     return [];
@@ -161,7 +169,7 @@ function validateBuyRequirementInput(body) {
 function validateSellListingInput(body) {
   return {
     ...validateListingIdentity(body),
-    quality: optionalEnum(body.quality, QUALITY_GRADES, 'quality'),
+    quality: requireEnum(body.quality, QUALITY_GRADES, 'quality'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
     weightKg: optionalPositiveInt(body.weightKg, 'weightKg'),
     price: optionalPositiveDecimal(body.price, 'price'),
@@ -211,7 +219,7 @@ function validateSellListingPatch(body) {
     patch.commodityId = validateUuid(body.commodityId, 'commodityId');
   }
   if (body.quality !== undefined) {
-    patch.quality = optionalEnum(body.quality, QUALITY_GRADES, 'quality');
+    patch.quality = requireEnum(body.quality, QUALITY_GRADES, 'quality');
   }
   if (body.quantityBags !== undefined) {
     patch.quantityBags = requirePositiveInt(body.quantityBags, 'quantityBags');
@@ -272,4 +280,5 @@ module.exports = {
   // {listingId, price} entry needs the same price rule (0 clears) as a single PATCH.
   requireNonNegativeDecimal,
   optionalEnum,
+  requireEnum,
 };
