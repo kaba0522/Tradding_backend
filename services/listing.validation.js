@@ -81,15 +81,27 @@ function optionalPositiveDecimal(value, fieldName) {
   return parsed;
 }
 
-// PATCH-only: price is sticky and never nulled (CLAUDE.md §2), so a price key
-// present in a patch body must be a real positive number — null/omitted-looking
-// values are rejected rather than silently treated as "clear the price".
-function requirePositiveDecimal(value, fieldName) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new AppError(`${fieldName} must be a positive number`, 400);
+// A price key present in a patch body must be a real number >= 0. `0` is the one
+// explicit way to say "clear the price": callers map it to price=null + status
+// `na` (see listing.service.js). null/blank/non-numeric values are still rejected
+// rather than silently treated as "clear the price" — Number(null) and Number('')
+// are 0, so they're ruled out before parsing.
+function requireNonNegativeDecimal(value, fieldName) {
+  const isBlank = value === null || (typeof value === 'string' && value.trim() === '');
+  const parsed = isBlank || typeof value === 'boolean' ? NaN : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new AppError(`${fieldName} must be a number >= 0 (0 clears the price)`, 400);
   }
   return parsed;
+}
+
+// Excel cells: a blank cell is "no price given" (null — keep the current price on
+// update, no price on create); a literal 0 is the explicit clear (returned as 0).
+function optionalNonNegativeDecimal(value, fieldName) {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return null;
+  }
+  return requireNonNegativeDecimal(value, fieldName);
 }
 
 function optionalEnum(value, allowedValues, fieldName) {
@@ -100,6 +112,14 @@ function optionalEnum(value, allowedValues, fieldName) {
     throw new AppError(`${fieldName} must be one of: ${allowedValues.join(', ')}`, 400);
   }
   return value;
+}
+
+// Unlike optionalEnum, a missing/null value is rejected (quality on SELL listings).
+function requireEnum(value, allowedValues, fieldName) {
+  if (value === undefined || value === null || value === '') {
+    throw new AppError(`${fieldName} is required and must be one of: ${allowedValues.join(', ')}`, 400);
+  }
+  return optionalEnum(value, allowedValues, fieldName);
 }
 
 function optionalUrlArray(value, fieldName) {
@@ -149,7 +169,7 @@ function validateBuyRequirementInput(body) {
 function validateSellListingInput(body) {
   return {
     ...validateListingIdentity(body),
-    quality: optionalEnum(body.quality, QUALITY_GRADES, 'quality'),
+    quality: requireEnum(body.quality, QUALITY_GRADES, 'quality'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
     weightKg: optionalPositiveInt(body.weightKg, 'weightKg'),
     price: optionalPositiveDecimal(body.price, 'price'),
@@ -199,7 +219,7 @@ function validateSellListingPatch(body) {
     patch.commodityId = validateUuid(body.commodityId, 'commodityId');
   }
   if (body.quality !== undefined) {
-    patch.quality = optionalEnum(body.quality, QUALITY_GRADES, 'quality');
+    patch.quality = requireEnum(body.quality, QUALITY_GRADES, 'quality');
   }
   if (body.quantityBags !== undefined) {
     patch.quantityBags = requirePositiveInt(body.quantityBags, 'quantityBags');
@@ -208,7 +228,7 @@ function validateSellListingPatch(body) {
     patch.weightKg = optionalPositiveInt(body.weightKg, 'weightKg');
   }
   if (body.price !== undefined) {
-    patch.price = requirePositiveDecimal(body.price, 'price');
+    patch.price = requireNonNegativeDecimal(body.price, 'price');
   }
   if (body.photoUrls !== undefined) {
     patch.photoUrls = optionalUrlArray(body.photoUrls, 'photoUrls');
@@ -255,8 +275,10 @@ module.exports = {
   optionalPositiveInt,
   optionalNonNegativeInt,
   optionalPositiveDecimal,
+  optionalNonNegativeDecimal,
   // Exported for reuse by listing.service.js's bulk "set-many" mode — each
-  // {listingId, price} entry needs the same sticky-price rule as a single PATCH.
-  requirePositiveDecimal,
+  // {listingId, price} entry needs the same price rule (0 clears) as a single PATCH.
+  requireNonNegativeDecimal,
   optionalEnum,
+  requireEnum,
 };
