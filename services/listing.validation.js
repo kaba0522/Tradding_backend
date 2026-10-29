@@ -159,6 +159,7 @@ function validateBuyRequirementInput(body) {
   rejectBuyPrice(body);
   return {
     ...validateListingIdentity(body),
+    quality: requireEnum(body.quality, QUALITY_GRADES, 'quality'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
   };
 }

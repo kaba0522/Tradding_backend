@@ -119,6 +119,7 @@ async function createListing(userId, body) {
           categoryId: input.categoryId,
           commodityId: input.commodityId,
           itemName: commodity.name,
+          quality: input.quality,
           quantityBags: input.quantityBags,
           availabilityBags: input.quantityBags,
           currency: 'INR',
