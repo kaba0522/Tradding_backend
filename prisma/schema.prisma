@@ -519,6 +519,8 @@ model AuditLog {
   actor AppUser @relation("AuditLogActor", fields: [actorUserId], references: [id], onDelete: Restrict)
 
   @@index([entity, entityId, createdAt], map: "ix_audit_entity")
+  @@index([createdAt], map: "ix_audit_created")
+  @@index([actorUserId, createdAt], map: "ix_audit_actor")
   @@map("audit_log")
 }
 

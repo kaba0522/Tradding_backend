@@ -60,7 +60,7 @@ async function getById(req, res, next) {
 async function update(req, res, next) {
   try {
     const { id } = req.params;
-    const listing = await listingService.updateListing(id, req.user.id, req.body);
+    const listing = await listingService.updateListing(id, req.user.id, req.body, req.user);
     sendSuccess(res, 200, listing);
   } catch (err) {
     next(err);
@@ -79,11 +79,21 @@ async function bulkPrice(req, res, next) {
 async function withdraw(req, res, next) {
   try {
     const { id } = req.params;
-    const listing = await listingService.withdrawListing(id, req.user.id);
+    const listing = await listingService.withdrawListing(id, req.user.id, req.user);
     sendSuccess(res, 200, listing);
   } catch (err) {
     next(err);
   }
 }
 
-module.exports = { create, list, getById, update, bulkPrice, withdraw };
+async function forceExpire(req, res, next) {
+  try {
+    const { id } = req.params;
+    const listing = await listingService.forceExpireListing(id, req.user.id);
+    sendSuccess(res, 200, listing);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { create, list, getById, update, bulkPrice, withdraw, forceExpire };
