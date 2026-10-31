@@ -1,7 +1,7 @@
 var express = require('express');
 var router = express.Router();
 var multer = require('multer');
-var { authenticate, requireTosAccepted } = require('../middleware/auth');
+var { authenticate, requireRole, requireTosAccepted } = require('../middleware/auth');
 var { AppError } = require('../lib/errors');
 var listingController = require('../controllers/listing.controller');
 var listingBulkController = require('../controllers/listing-bulk.controller');
@@ -54,6 +54,7 @@ router.get('/:id', listingController.getById);
 // Must come before '/:id' — otherwise Express would match "bulk-price" as :id.
 router.patch('/bulk-price', listingController.bulkPrice);
 router.patch('/:id/withdraw', listingController.withdraw);
+router.patch('/:id/force-expire', requireRole(['admin']), listingController.forceExpire);
 router.patch('/:id', listingController.update);
 router.post('/bulk-upload', handleBulkUploadFile, listingBulkController.bulkUpload);
 router.post('/bulk-confirm', listingBulkController.bulkConfirm);

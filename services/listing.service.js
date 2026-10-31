@@ -295,15 +295,41 @@ async function getListingById(id) {
   return serializeListing(listing);
 }
 
-async function updateListing(id, userId, body) {
+// The owner always passes. An admin may act on someone else's listing (edit-on-behalf,
+// CLAUDE.md §4.4) — `byAdmin: true` tells the caller to write an AuditLog entry.
+// Anyone else is rejected. An admin acting on their OWN listing is just an owner.
+function resolveListingAccess(existing, userId, requestingUser) {
+  if (existing.userId === userId) {
+    return { byAdmin: false };
+  }
+  if (requestingUser && requestingUser.id === userId && requestingUser.roles.includes('admin')) {
+    return { byAdmin: true };
+  }
+  throw new AppError('Forbidden', 403);
+}
+
+async function writeAdminListingAudit(action, actorUserId, before, after) {
+  await prisma.auditLog.create({
+    data: {
+      actorUserId,
+      action,
+      entity: 'Listing',
+      entityId: before.id,
+      before: serializeListing(before),
+      after: serializeListing(after),
+    },
+  });
+}
+
+async function updateListing(id, userId, body, requestingUser) {
   validateUuid(id);
   const existing = await prisma.listing.findUnique({ where: { id } });
   if (!existing) {
     throw new AppError('Listing not found', 404);
   }
-  if (existing.userId !== userId) {
-    throw new AppError('Forbidden', 403);
-  }
+  const { byAdmin } = resolveListingAccess(existing, userId, requestingUser);
+  // Defaults (payment terms) belong to the listing's owner, not to the admin editing it.
+  const ownerId = existing.userId;
 
   const patch = validateListingUpdateInput(existing.side, body);
 
@@ -319,11 +345,11 @@ async function updateListing(id, userId, body) {
   if (existing.side === 'SELL') {
     if (patch.paymentTerms === null) {
       // Explicit "use my default" — must resolve, else reject.
-      patch.paymentTerms = resolvePaymentTerms(null, await getOwnerDefaultPaymentTerms(userId));
+      patch.paymentTerms = resolvePaymentTerms(null, await getOwnerDefaultPaymentTerms(ownerId));
     } else if (patch.paymentTerms === undefined && existing.paymentTerms === null) {
       // Legacy listing with no terms: self-heal from the profile default if there is
       // one, but never block an unrelated edit (e.g. a price change) if there isn't.
-      const userDefault = await getOwnerDefaultPaymentTerms(userId);
+      const userDefault = await getOwnerDefaultPaymentTerms(ownerId);
       if (userDefault !== null) {
         patch.paymentTerms = userDefault;
       }
@@ -353,6 +379,9 @@ async function updateListing(id, userId, body) {
       );
     }
     throw err;
+  }
+  if (byAdmin) {
+    await writeAdminListingAudit('LISTING_UPDATED_BY_ADMIN', userId, existing, updated);
   }
   return serializeListing(updated);
 }
@@ -514,15 +543,13 @@ async function bulkSetManyPrice(userId, { updates }) {
   return { updated, skipped };
 }
 
-async function withdrawListing(id, userId) {
+async function withdrawListing(id, userId, requestingUser) {
   validateUuid(id);
   const existing = await prisma.listing.findUnique({ where: { id } });
   if (!existing) {
     throw new AppError('Listing not found', 404);
   }
-  if (existing.userId !== userId) {
-    throw new AppError('Forbidden', 403);
-  }
+  const { byAdmin } = resolveListingAccess(existing, userId, requestingUser);
   if (existing.status === 'withdrawn') {
     throw new AppError('Listing is already withdrawn', 409);
   }
@@ -534,6 +561,33 @@ async function withdrawListing(id, userId) {
     where: { id },
     data: { status: 'withdrawn' },
   });
+  if (byAdmin) {
+    await writeAdminListingAudit('LISTING_WITHDRAWN_BY_ADMIN', userId, existing, updated);
+  }
+  return serializeListing(updated);
+}
+
+// Admin-only (enforced by the route). Same effect as the daily expiry job on one
+// row: `active` -> `price_expired`, price left untouched (sticky rule). A BUY
+// requirement has no price, so it can't expire.
+async function forceExpireListing(id, adminUserId) {
+  validateUuid(id);
+  const existing = await prisma.listing.findUnique({ where: { id } });
+  if (!existing) {
+    throw new AppError('Listing not found', 404);
+  }
+  if (existing.side !== 'SELL') {
+    throw new AppError('Only a sell listing can be expired', 400);
+  }
+  if (existing.status !== 'active') {
+    throw new AppError('Only an active listing can be force-expired', 409);
+  }
+
+  const updated = await prisma.listing.update({
+    where: { id },
+    data: { status: 'price_expired' },
+  });
+  await writeAdminListingAudit('LISTING_FORCE_EXPIRED', adminUserId, existing, updated);
   return serializeListing(updated);
 }
 
@@ -544,6 +598,7 @@ module.exports = {
   updateListing,
   bulkUpdatePrice,
   withdrawListing,
+  forceExpireListing,
   computeNextExpiryCutoff,
   // Exported for reuse by listing-bulk.service.js.
   fetchCategoryAndCommodity,
