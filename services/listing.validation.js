@@ -3,26 +3,6 @@ const { validateUuid } = require('../lib/validators');
 
 const URL_REGEX = /^https?:\/\/\S+$/i;
 const VALID_SIDES = ['SELL', 'BUY'];
-// Mirrors the QualityGrade enum in schema.prisma. Starting list per founder —
-// more values will be added later, so keep this the single source of truth.
-const QUALITY_GRADES = [
-  'barik',
-  'chota',
-  'mota',
-  'dardra',
-  'small',
-  'bold',
-  'normal',
-  'dry',
-  'full_green',
-  'medium',
-  'standard',
-  'madras',
-  'imported',
-  'stream',
-  'sella',
-  'parmal',
-];
 
 function optionalString(value, fieldName) {
   if (value === undefined || value === null) {
@@ -104,24 +84,6 @@ function optionalNonNegativeDecimal(value, fieldName) {
   return requireNonNegativeDecimal(value, fieldName);
 }
 
-function optionalEnum(value, allowedValues, fieldName) {
-  if (value === undefined || value === null) {
-    return null;
-  }
-  if (!allowedValues.includes(value)) {
-    throw new AppError(`${fieldName} must be one of: ${allowedValues.join(', ')}`, 400);
-  }
-  return value;
-}
-
-// Unlike optionalEnum, a missing/null value is rejected (quality on SELL listings).
-function requireEnum(value, allowedValues, fieldName) {
-  if (value === undefined || value === null || value === '') {
-    throw new AppError(`${fieldName} is required and must be one of: ${allowedValues.join(', ')}`, 400);
-  }
-  return optionalEnum(value, allowedValues, fieldName);
-}
-
 function optionalUrlArray(value, fieldName) {
   if (value === undefined || value === null) {
     return [];
@@ -137,10 +99,14 @@ function optionalUrlArray(value, fieldName) {
   });
 }
 
+// Quality is a per-category admin-managed table, so the client sends its id (not a
+// grade name). Required on both sides; whether it belongs to categoryId is checked
+// in listing.service.js (fetchQuality).
 function validateListingIdentity(body) {
   return {
     categoryId: validateUuid(body.categoryId, 'categoryId'),
     commodityId: validateUuid(body.commodityId, 'commodityId'),
+    qualityId: validateUuid(body.qualityId, 'qualityId'),
   };
 }
 
@@ -159,7 +125,6 @@ function validateBuyRequirementInput(body) {
   rejectBuyPrice(body);
   return {
     ...validateListingIdentity(body),
-    quality: requireEnum(body.quality, QUALITY_GRADES, 'quality'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
   };
 }
@@ -170,7 +135,6 @@ function validateBuyRequirementInput(body) {
 function validateSellListingInput(body) {
   return {
     ...validateListingIdentity(body),
-    quality: requireEnum(body.quality, QUALITY_GRADES, 'quality'),
     quantityBags: requirePositiveInt(body.quantityBags, 'quantityBags'),
     weightKg: optionalPositiveInt(body.weightKg, 'weightKg'),
     price: optionalPositiveDecimal(body.price, 'price'),
@@ -205,6 +169,9 @@ function validateBuyRequirementPatch(body) {
   if (body.commodityId !== undefined) {
     patch.commodityId = validateUuid(body.commodityId, 'commodityId');
   }
+  if (body.qualityId !== undefined) {
+    patch.qualityId = validateUuid(body.qualityId, 'qualityId');
+  }
   if (body.quantityBags !== undefined) {
     patch.quantityBags = requirePositiveInt(body.quantityBags, 'quantityBags');
   }
@@ -219,8 +186,8 @@ function validateSellListingPatch(body) {
   if (body.commodityId !== undefined) {
     patch.commodityId = validateUuid(body.commodityId, 'commodityId');
   }
-  if (body.quality !== undefined) {
-    patch.quality = requireEnum(body.quality, QUALITY_GRADES, 'quality');
+  if (body.qualityId !== undefined) {
+    patch.qualityId = validateUuid(body.qualityId, 'qualityId');
   }
   if (body.quantityBags !== undefined) {
     patch.quantityBags = requirePositiveInt(body.quantityBags, 'quantityBags');
@@ -270,7 +237,6 @@ module.exports = {
   validateListingUpdateInput,
   // Exported for reuse by listing-bulk.service.js — same per-field rules,
   // applied there row-by-row against parsed Excel cells (see that file).
-  QUALITY_GRADES,
   optionalString,
   requirePositiveInt,
   optionalPositiveInt,
@@ -280,6 +246,4 @@ module.exports = {
   // Exported for reuse by listing.service.js's bulk "set-many" mode — each
   // {listingId, price} entry needs the same price rule (0 clears) as a single PATCH.
   requireNonNegativeDecimal,
-  optionalEnum,
-  requireEnum,
 };

@@ -33,9 +33,20 @@ function toNumberOrNull(decimal) {
   return typeof decimal.toNumber === 'function' ? decimal.toNumber() : Number(decimal);
 }
 
+// Every listing that gets serialized must be loaded with this include, otherwise
+// `quality` below would fall back to the legacy value for rows that have a qualityId.
+const LISTING_INCLUDE = { quality: { select: { id: true, name: true } } };
+
+// `quality` stays a display string in the API response (the quality name; or, for
+// pre-existing rows that only have the old enum value, that legacy value), alongside
+// `qualityId` for the new FK. qualityLegacy is an internal detail, not exposed.
 function serializeListing(listing) {
-  const { updatedAt, ...rest } = listing;
-  return { ...rest, price: toNumberOrNull(listing.price) };
+  const { updatedAt, quality, qualityLegacy, ...rest } = listing;
+  return {
+    ...rest,
+    quality: quality ? quality.name : (qualityLegacy ?? null),
+    price: toNumberOrNull(listing.price),
+  };
 }
 
 // Combines the admin-configured price_expiry_time (HH:mm, Asia/Kolkata) with
@@ -71,6 +82,27 @@ async function fetchCategoryAndCommodity(categoryId, commodityId) {
   return commodity;
 }
 
+// Quality is category-scoped: it must exist AND belong to the listing's category.
+// A category with no qualities at all gets its own message, since the user can't fix
+// that themselves — an admin has to add qualities first.
+async function fetchQuality(categoryId, qualityId) {
+  const quality = await prisma.quality.findUnique({ where: { id: qualityId } });
+  if (quality && quality.categoryId === categoryId) {
+    return quality;
+  }
+  const qualityCount = await prisma.quality.count({ where: { categoryId } });
+  if (qualityCount === 0) {
+    throw new AppError(
+      'This category has no qualities yet — ask an admin to add qualities before creating listings in it',
+      400
+    );
+  }
+  if (!quality) {
+    throw new AppError('Quality not found', 404);
+  }
+  throw new AppError('qualityId does not belong to categoryId', 400);
+}
+
 async function getOwnerDefaultPaymentTerms(userId) {
   const owner = await prisma.appUser.findUnique({
     where: { id: userId },
@@ -97,6 +129,7 @@ function resolvePaymentTerms(listingValue, userDefault) {
 async function createListing(userId, body) {
   const input = validateListingCreateInput(body);
   const commodity = await fetchCategoryAndCommodity(input.categoryId, input.commodityId);
+  await fetchQuality(input.categoryId, input.qualityId);
 
   let paymentTerms = null;
   if (input.side === 'SELL') {
@@ -119,7 +152,7 @@ async function createListing(userId, body) {
           categoryId: input.categoryId,
           commodityId: input.commodityId,
           itemName: commodity.name,
-          quality: input.quality,
+          qualityId: input.qualityId,
           quantityBags: input.quantityBags,
           availabilityBags: input.quantityBags,
           currency: 'INR',
@@ -131,7 +164,7 @@ async function createListing(userId, body) {
           categoryId: input.categoryId,
           commodityId: input.commodityId,
           itemName: commodity.name,
-          quality: input.quality,
+          qualityId: input.qualityId,
           quantityBags: input.quantityBags,
           availabilityBags: input.quantityBags,
           weightKg: input.weightKg,
@@ -150,7 +183,7 @@ async function createListing(userId, body) {
 
   let listing;
   try {
-    listing = await prisma.listing.create({ data });
+    listing = await prisma.listing.create({ data, include: LISTING_INCLUDE });
   } catch (err) {
     if (err.code === 'P2002') {
       throw new AppError(
@@ -273,7 +306,10 @@ async function getListings({
       orderBy,
       skip,
       take,
-      include: { user: { select: { name: true, firmName: true, phone: true, roles: true } } },
+      include: {
+        ...LISTING_INCLUDE,
+        user: { select: { name: true, firmName: true, phone: true, roles: true } },
+      },
     }),
     prisma.listing.count({ where }),
   ]);
@@ -286,6 +322,7 @@ async function getListingById(id) {
   const listing = await prisma.listing.findUnique({
     where: { id },
     include: {
+      ...LISTING_INCLUDE,
       user: { select: { id: true, name: true, firmName: true, phone: true, city: true } },
     },
   });
@@ -323,7 +360,7 @@ async function writeAdminListingAudit(action, actorUserId, before, after) {
 
 async function updateListing(id, userId, body, requestingUser) {
   validateUuid(id);
-  const existing = await prisma.listing.findUnique({ where: { id } });
+  const existing = await prisma.listing.findUnique({ where: { id }, include: LISTING_INCLUDE });
   if (!existing) {
     throw new AppError('Listing not found', 404);
   }
@@ -342,6 +379,16 @@ async function updateListing(id, userId, body, requestingUser) {
     patch.itemName = commodity.name;
   }
 
+  // Quality must stay inside the listing's category. Re-check whenever the category or
+  // the quality changes (moving category without picking a new quality is rejected,
+  // since the old quality belongs to the old category). Legacy rows with no qualityId
+  // are left alone unless the caller supplies one — an unrelated edit (price, qty)
+  // must not be blocked by the missing quality.
+  const nextQualityId = patch.qualityId ?? existing.qualityId;
+  if (nextQualityId && (patch.categoryId !== undefined || patch.qualityId !== undefined)) {
+    await fetchQuality(patch.categoryId ?? existing.categoryId, nextQualityId);
+  }
+
   if (existing.side === 'SELL') {
     if (patch.paymentTerms === null) {
       // Explicit "use my default" — must resolve, else reject.
@@ -357,6 +404,10 @@ async function updateListing(id, userId, body, requestingUser) {
   }
 
   const data = { ...patch };
+  if (patch.qualityId !== undefined) {
+    // The row is now on the new quality table; its old enum value no longer applies.
+    data.qualityLegacy = null;
+  }
   if (patch.quantityBags !== undefined) {
     // Same as create / Excel: availability follows the quantity the owner sets.
     data.availabilityBags = patch.quantityBags;
@@ -370,7 +421,7 @@ async function updateListing(id, userId, body, requestingUser) {
 
   let updated;
   try {
-    updated = await prisma.listing.update({ where: { id }, data });
+    updated = await prisma.listing.update({ where: { id }, data, include: LISTING_INCLUDE });
   } catch (err) {
     if (err.code === 'P2002') {
       throw new AppError(
@@ -420,7 +471,7 @@ async function applyBulkPriceUpdates(toUpdate) {
         data.quantityBags = quantityBags;
         data.availabilityBags = quantityBags;
       }
-      return prisma.listing.update({ where: { id }, data });
+      return prisma.listing.update({ where: { id }, data, include: LISTING_INCLUDE });
     })
   );
   return updated.map(serializeListing);
@@ -491,7 +542,7 @@ async function bulkDeltaPrice(userId, { listingIds, value }) {
       continue;
     }
 
-    const fresh = await prisma.listing.findUnique({ where: { id } });
+    const fresh = await prisma.listing.findUnique({ where: { id }, include: LISTING_INCLUDE });
     updated.push(serializeListing(fresh));
   }
 
@@ -545,7 +596,7 @@ async function bulkSetManyPrice(userId, { updates }) {
 
 async function withdrawListing(id, userId, requestingUser) {
   validateUuid(id);
-  const existing = await prisma.listing.findUnique({ where: { id } });
+  const existing = await prisma.listing.findUnique({ where: { id }, include: LISTING_INCLUDE });
   if (!existing) {
     throw new AppError('Listing not found', 404);
   }
@@ -560,6 +611,7 @@ async function withdrawListing(id, userId, requestingUser) {
   const updated = await prisma.listing.update({
     where: { id },
     data: { status: 'withdrawn' },
+    include: LISTING_INCLUDE,
   });
   if (byAdmin) {
     await writeAdminListingAudit('LISTING_WITHDRAWN_BY_ADMIN', userId, existing, updated);
@@ -572,7 +624,7 @@ async function withdrawListing(id, userId, requestingUser) {
 // requirement has no price, so it can't expire.
 async function forceExpireListing(id, adminUserId) {
   validateUuid(id);
-  const existing = await prisma.listing.findUnique({ where: { id } });
+  const existing = await prisma.listing.findUnique({ where: { id }, include: LISTING_INCLUDE });
   if (!existing) {
     throw new AppError('Listing not found', 404);
   }
@@ -586,6 +638,7 @@ async function forceExpireListing(id, adminUserId) {
   const updated = await prisma.listing.update({
     where: { id },
     data: { status: 'price_expired' },
+    include: LISTING_INCLUDE,
   });
   await writeAdminListingAudit('LISTING_FORCE_EXPIRED', adminUserId, existing, updated);
   return serializeListing(updated);
@@ -602,6 +655,7 @@ module.exports = {
   computeNextExpiryCutoff,
   // Exported for reuse by listing-bulk.service.js.
   fetchCategoryAndCommodity,
+  fetchQuality,
   getOwnerDefaultPaymentTerms,
   resolvePaymentTerms,
 };

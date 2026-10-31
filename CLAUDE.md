@@ -205,7 +205,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 
 5. **Platform settings**
    - **Price-expiry time** (global, default 2:00 AM, Asia/Kolkata).
-   - **Commodity taxonomy management** — add/edit categories and commodities (keeps the platform commodity-agnostic without code changes).
+   - **Commodity taxonomy management** — add/edit categories, commodities, and **qualities per category** (keeps the platform commodity-agnostic without code changes). Every new category needs its qualities added (`POST /qualities`, one `name` or many `names`); until it has at least one, no listing can be created in it. `GET /commodity-categories` returns `qualityCount` so the admin UI can flag empty categories.
    - **Broker list** management (the finite dropdown used on the trade-accept screen).
    - **Payment-terms** defaults.
 
@@ -251,7 +251,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 |-------|-------------|
 | Commodity **category** | Required (taxonomy, e.g., "Rajma", "Kabli", "Chana", "Urad Dal") — the left grouping column on the real sheet |
 | Commodity **name / trademark** | Required (e.g., "Chitra Pila Badshah", "Garbanzo Dry White") — the specific product line; on the real sheet this is one free-text string carrying grade/origin/color |
-| **Quality** | **Free text** (confirmed by real sheet — origin, grade, color are embedded in the name string; do NOT force a controlled dropdown). May be same field as name or a secondary note. |
+| **Quality** | **Required** on both SELL listings and BUY requirements. An **admin-managed grade scoped to the commodity category** (`quality` table: Rice → Sella, Steam; Rajma → Bold, Medium…), chosen from a dropdown filtered by the selected category — NOT free text and NOT a global enum. API takes `qualityId` and rejects one that doesn't belong to `categoryId`; responses return `quality` (name) plus `qualityId`. Brand/origin/color detail still lives in the commodity name. *(Rows created before this change keep their old enum value in `quality_legacy` until the old data is wiped.)* |
 | **Weight / packing** | **Optional, with supplier-level default.** Sheet A has a per-row weight column (30/35/45KG); Sheet B has no weight at all. So weight can be per-listing, inherited from a supplier default, or absent. When present, price is **per bag of this weight**. |
 | **Price / rate** | Required for an active listing; cleared on expiry. `N/A` is a valid "not available today" state (null price, row kept). Price is per bag when a weight is set, otherwise a per-item rate. Note format variance: bare integers (Sheet A) vs. `/-` suffix (Sheet B) — normalize on parse. |
 | **Photo** | Optional |
@@ -424,12 +424,12 @@ Entities are intentionally commodity-agnostic and role-flexible.
 - **Invite**: `id, phone, invited_by, role_hint, status (pending|accepted|revoked), created_at`
 - **CommodityType**: `id, name` (e.g., Rice, Pulses) — extensible taxonomy
 - **Commodity**: `id, type_id, name` (e.g., Basmati 1121) — extensible
-- **QualityGrade** *(optional/TBD)*: `id, commodity_id, label`
+- **Quality**: `id, category_id, name, created_at` — per-category grade, unique `(category_id, name)`; admin-managed. Not deletable while a listing uses it; rename only (never moves category).
 - **Supplier / Firm**: `id, name, roles (usually seller), contacts[] (name+phone salesmen/accountants), default_payment_terms, firm_notes, default_weight_kg?` — a supplier maps to one or more user accounts.
 - **SubEntity** (optional): `id, supplier_id, name` — one supplier can list under multiple business entities/brands (e.g., Kunj Bihari Food Industries / Agro Products / Pulses / Impex). Listings may reference a sub-entity. Decide whether buyers see sub-entities or a flattened supplier — see §10.
 - **SupplierTemplate** (Phase 2): `id, supplier_id, version, column_map, has_weight bool, price_format, table_layout, subentity_map, confidence_threshold, created_at` — the learned parse template per supplier (see §4.8).
 - **Listing** (sell) / **Requirement** (buy) — can be one polymorphic `Listing` table with `side (SELL|BUY)`:
-  - `id, side, user_id, supplier_id, subentity_id?, category_id, commodity_id, item_name (free text), quality (free text), weight_kg? (OPTIONAL per-bag packing size; may inherit supplier default or be absent), price (nullable when N/A or expired), currency, photo_url?, moisture?, color?, size?, payment_terms (nullable → inherits supplier default), notes?, is_featured? (maps to the yellow-highlight cue, TBD), status (active|price_expired|na|withdrawn|traded), price_valid_until, created_at, updated_at`
+  - `id, side, user_id, supplier_id, subentity_id?, category_id, commodity_id, item_name (free text), quality_id (FK → Quality, must belong to category_id), weight_kg? (OPTIONAL per-bag packing size; may inherit supplier default or be absent), price (nullable when N/A or expired), currency, photo_url?, moisture?, color?, size?, payment_terms (nullable → inherits supplier default), notes?, is_featured? (maps to the yellow-highlight cue, TBD), status (active|price_expired|na|withdrawn|traded), price_valid_until, created_at, updated_at`
   - **Note:** price is *per bag of `weight_kg`* when weight is set, otherwise a per-item rate. Do not assume a global unit — Sheet A mixes 30/35/45 KG bags, Sheet B has no weight.
 - **Negotiation**: `id, listing_id, buyer_id, seller_id, status (open|accepted|declined|voided|expired), created_at` — **enforce `buyer_id != seller_id`** (self-trade guard). `voided` = another negotiation on the same listing was accepted first; `expired` = 2 AM. See §5.
 - **Offer**: `id, negotiation_id, by_user_id, price, type (offer|counter|accept|decline|retract), status (pending|accepted|declined|countered|retracted|expired), created_at` — price only (MVP). Latest pending offer supersedes prior.
