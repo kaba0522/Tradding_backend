@@ -61,7 +61,9 @@ enum ListingStatus {
   @@map("listing_status")
 }
 
-// Grain-size grading. Starting list per founder; more values added later as needed.
+// LEGACY. Quality is now a per-category table (model Quality). This enum only types
+// Listing.qualityLegacy, which holds the old value on pre-existing rows. Drop both
+// once the old listing data is wiped (see the quality_by_category migration).
 enum QualityGrade {
   barik
   chota
@@ -262,10 +264,26 @@ model CommodityCategory {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   commodities       Commodity[]
+  qualities         Quality[]
   listings          Listing[]
   buyerRequirements BuyerRequirement[]
 
   @@map("commodity_category")
+}
+
+// Admin-managed, category-scoped quality grades (e.g. Rice -> Sella, Steam; Rajma ->
+// Bold, Medium). The listing form's quality dropdown is this table filtered by category.
+model Quality {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId String   @map("category_id") @db.Uuid
+  name       String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  category CommodityCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  listings Listing[]
+
+  @@unique([categoryId, name], map: "uq_quality_category_id_name")
+  @@map("quality")
 }
 
 model Commodity {
@@ -293,7 +311,10 @@ model Listing {
   categoryId       String        @map("category_id") @db.Uuid
   commodityId      String?       @map("commodity_id") @db.Uuid
   itemName         String        @map("item_name")
-  quality          QualityGrade?
+  // qualityId is required by the API on every create/edit but nullable in the DB:
+  // pre-existing rows only have qualityLegacy (the old enum value) until they are wiped.
+  qualityId        String?       @map("quality_id") @db.Uuid
+  qualityLegacy    QualityGrade? @map("quality_legacy")
   quantityBags     Int           @map("quantity_bags")
   availabilityBags Int           @map("availability_bags")
   weightKg         Int?          @map("weight_kg")
@@ -314,16 +335,19 @@ model Listing {
   user      AppUser           @relation("ListingUser", fields: [userId], references: [id], onDelete: Restrict)
   category  CommodityCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   commodity Commodity?        @relation(fields: [commodityId], references: [id], onDelete: SetNull)
+  quality   Quality?          @relation(fields: [qualityId], references: [id], onDelete: Restrict)
 
   negotiations           Negotiation[]
   recentlyViewedListings RecentlyViewedListing[]
 
   @@index([side, categoryId, status, price], map: "ix_listing_browse")
   @@index([userId, status], map: "ix_listing_by_user")
+  @@index([qualityId], map: "ix_listing_quality")
   // Partial index ix_listing_active (status) WHERE status = 'active' added via raw SQL.
   // Partial unique uq_listing_no_duplicate_sell (user_id, category_id, commodity_id,
-  // weight_kg, quality) WHERE side = 'SELL' AND status IN ('active','na','price_expired'),
-  // NULLS NOT DISTINCT, added via raw SQL in the migration.
+  // weight_kg, quality_id, quality_legacy) WHERE side = 'SELL' AND status IN
+  // ('active','na','price_expired'), NULLS NOT DISTINCT, added via raw SQL in the
+  // migration. quality_legacy stays in the key only until the old rows are wiped.
   @@map("listing")
 }
 

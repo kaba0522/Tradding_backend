@@ -42,10 +42,19 @@ async function listCategories({ name, skip, take } = {}) {
   const nameFilter = buildContainsFilter(name);
   const where = nameFilter ? { name: nameFilter } : undefined;
 
-  const [data, total] = await Promise.all([
-    prisma.commodityCategory.findMany({ where, orderBy: { name: 'asc' }, skip, take }),
+  const [rows, total] = await Promise.all([
+    prisma.commodityCategory.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      skip,
+      take,
+      include: { _count: { select: { qualities: true } } },
+    }),
     prisma.commodityCategory.count({ where }),
   ]);
+  // qualityCount lets the admin UI flag categories that still have no qualities
+  // (listings can't be created in them until at least one is added).
+  const data = rows.map(({ _count, ...category }) => ({ ...category, qualityCount: _count.qualities }));
   return { data, total };
 }
 
@@ -97,7 +106,7 @@ async function deleteCategory(id, actorUserId) {
   } catch (err) {
     if (err.code === 'P2003') {
       throw new AppError(
-        'Cannot delete a category that is still referenced by commodities, listings, or buyer requirements',
+        'Cannot delete a category that is still referenced by commodities, qualities, listings, or buyer requirements',
         409
       );
     }

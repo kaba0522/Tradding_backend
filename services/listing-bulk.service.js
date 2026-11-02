@@ -6,24 +6,23 @@ const { validateUuid } = require('../lib/validators');
 const {
   createListing,
   fetchCategoryAndCommodity,
+  fetchQuality,
   computeNextExpiryCutoff,
   getOwnerDefaultPaymentTerms,
   resolvePaymentTerms,
 } = require('./listing.service');
 const {
-  QUALITY_GRADES,
   optionalString,
   requirePositiveInt,
   optionalPositiveInt,
   optionalNonNegativeInt,
   optionalNonNegativeDecimal,
-  requireEnum,
 } = require('./listing.validation');
 
 const FUZZY_THRESHOLD = 0.6;
 const TEMPLATE_DATA_ROWS = 500;
-// Must match the partial unique index's WHERE clause in the
-// convert_quality_to_enum migration (uq_listing_no_duplicate_sell).
+// Must match the partial unique index's WHERE clause (uq_listing_no_duplicate_sell,
+// last rebuilt in the quality_by_category migration).
 const LIVE_STATUSES = ['active', 'na', 'price_expired'];
 
 const COLUMNS = [
@@ -87,9 +86,10 @@ function tryValidate(errors, fn) {
 }
 
 async function generateTemplateWorkbook() {
-  const [categories, commodities] = await Promise.all([
+  const [categories, commodities, qualities] = await Promise.all([
     prisma.commodityCategory.findMany({ orderBy: { name: 'asc' } }),
     prisma.commodity.findMany({ orderBy: { name: 'asc' } }),
+    prisma.quality.findMany({ orderBy: { name: 'asc' } }),
   ]);
 
   const workbook = new ExcelJS.Workbook();
@@ -115,6 +115,18 @@ async function generateTemplateWorkbook() {
     const col = listsSheet.getColumn(3 + i).letter;
     workbook.definedNames.add(`_lists!$${col}$1:$${col}$${Math.max(names.length, 1)}`, `cat_${i + 1}`);
   });
+  // Same trick for quality: columns after the commodity ones hold only category i's
+  // qualities, exposed as `qual_<i+1>`. A per-category range (not an inline
+  // "a,b,c" list) is also what keeps this working past Excel's 255-char inline limit.
+  categories.forEach((cat, i) => {
+    const names = qualities.filter((q) => q.categoryId === cat.id).map((q) => q.name);
+    const colIndex = 3 + categories.length + i;
+    names.forEach((name, j) => {
+      listsSheet.getCell(j + 1, colIndex).value = name;
+    });
+    const col = listsSheet.getColumn(colIndex).letter;
+    workbook.definedNames.add(`_lists!$${col}$1:$${col}$${Math.max(names.length, 1)}`, `qual_${i + 1}`);
+  });
   // Belt-and-suspenders: if some viewer ignores the hidden state and shows this
   // sheet anyway, sheet protection still stops the dropdown source values from
   // being edited (all cells are locked by default; protecting the sheet enforces it).
@@ -138,7 +150,6 @@ async function generateTemplateWorkbook() {
   sheet.columns = COLUMNS;
 
   const categoryRange = `_lists!$A$1:$A$${Math.max(categories.length, 1)}`;
-  const qualityInline = `"${QUALITY_GRADES.join(',')}"`;
 
   for (let row = 2; row <= TEMPLATE_DATA_ROWS + 1; row += 1) {
     sheet.getCell(`A${row}`).dataValidation = {
@@ -160,10 +171,10 @@ async function generateTemplateWorkbook() {
     sheet.getCell(`C${row}`).dataValidation = {
       type: 'list',
       allowBlank: false,
-      formulae: [qualityInline],
+      formulae: [`INDIRECT("qual_"&MATCH($A${row},${categoryRange},0))`],
       showErrorMessage: true,
       errorTitle: 'Invalid quality',
-      error: `Quality must be one of: ${QUALITY_GRADES.join(', ')}`,
+      error: 'Please pick a category first, then a quality from the dropdown list.',
     };
   }
 
@@ -183,9 +194,10 @@ async function parseUploadedWorkbook(buffer, userId) {
     throw new AppError('Uploaded file has no worksheet', 400);
   }
 
-  const [categories, commodities, userDefaultPaymentTerms] = await Promise.all([
+  const [categories, commodities, qualities, userDefaultPaymentTerms] = await Promise.all([
     prisma.commodityCategory.findMany(),
     prisma.commodity.findMany(),
+    prisma.quality.findMany(),
     getOwnerDefaultPaymentTerms(userId),
   ]);
 
@@ -220,6 +232,10 @@ async function parseUploadedWorkbook(buffer, userId) {
     const commodityCandidates =
       categoryMatch.match === 'exact' ? commodities.filter((c) => c.categoryId === categoryMatch.id) : commodities;
     const commodityMatch = matchName(raw.commodity, commodityCandidates);
+    // Qualities are category-scoped, so only the matched category's qualities are candidates.
+    const qualityCandidates =
+      categoryMatch.match === 'exact' ? qualities.filter((q) => q.categoryId === categoryMatch.id) : qualities;
+    const qualityMatch = matchName(raw.quality, qualityCandidates);
 
     if (categoryMatch.match === 'unresolved') {
       errors.push('category not found — please select manually');
@@ -227,8 +243,11 @@ async function parseUploadedWorkbook(buffer, userId) {
     if (commodityMatch.match === 'unresolved') {
       errors.push('commodity not found — please select manually');
     }
+    if (qualityMatch.match === 'unresolved') {
+      const blank = typeof raw.quality !== 'string' || raw.quality.trim() === '';
+      errors.push(blank ? 'quality is required' : 'quality not found — please select manually');
+    }
 
-    const quality = tryValidate(errors, () => requireEnum(raw.quality, QUALITY_GRADES, 'quality'));
     const quantityBags = tryValidate(errors, () => requirePositiveInt(raw.quantityBags, 'quantityBags'));
     const weightKg = tryValidate(errors, () => optionalPositiveInt(raw.weightKg, 'weightKg'));
     // blank => null (no price given); 0 => explicit "clear the price" (row goes `na`).
@@ -241,6 +260,7 @@ async function parseUploadedWorkbook(buffer, userId) {
     const size = tryValidate(errors, () => optionalString(raw.size, 'size'));
 
     const commodityRecord = commodityMatch.id ? commodities.find((c) => c.id === commodityMatch.id) : null;
+    const qualityRecord = qualityMatch.id ? qualities.find((q) => q.id === qualityMatch.id) : null;
 
     let willUpdateExisting = null;
     let existingPaymentTerms = null;
@@ -252,7 +272,7 @@ async function parseUploadedWorkbook(buffer, userId) {
           categoryId: categoryMatch.id,
           commodityId: commodityMatch.id,
           weightKg: weightKg ?? null,
-          quality: quality ?? null,
+          qualityId: qualityMatch.id,
           status: { in: LIVE_STATUSES },
         },
         select: { id: true, paymentTerms: true },
@@ -280,7 +300,8 @@ async function parseUploadedWorkbook(buffer, userId) {
       }
     }
 
-    const ready = errors.length === 0 && Boolean(categoryMatch.id) && Boolean(commodityMatch.id);
+    const ready =
+      errors.length === 0 && Boolean(categoryMatch.id) && Boolean(commodityMatch.id) && Boolean(qualityMatch.id);
     if (ready) {
       readyRows += 1;
     }
@@ -296,7 +317,10 @@ async function parseUploadedWorkbook(buffer, userId) {
         commodityMatch: commodityMatch.match,
         commoditySuggestion: commodityMatch.suggestion,
         itemName: commodityRecord ? commodityRecord.name : null,
-        quality: quality ?? null,
+        qualityId: qualityMatch.id,
+        qualityMatch: qualityMatch.match,
+        qualitySuggestion: qualityMatch.suggestion,
+        quality: qualityRecord ? qualityRecord.name : null,
         quantityBags: quantityBags ?? null,
         weightKg: weightKg ?? null,
         price: price ?? null,
@@ -337,8 +361,9 @@ async function bulkConfirmRows(userId, rows) {
       // Validates existence + category/commodity relationship; itemName is derived
       // inside createListing for the create path, and isn't touched on the update path.
       await fetchCategoryAndCommodity(categoryId, commodityId);
+      const qualityId = validateUuid(row.qualityId, 'qualityId');
+      await fetchQuality(categoryId, qualityId);
 
-      const quality = requireEnum(row.quality, QUALITY_GRADES, 'quality');
       const quantityBags = requirePositiveInt(row.quantityBags, 'quantityBags');
       const weightKg = optionalPositiveInt(row.weightKg, 'weightKg');
       const price = optionalNonNegativeDecimal(row.price, 'price');
@@ -355,7 +380,7 @@ async function bulkConfirmRows(userId, rows) {
           categoryId,
           commodityId,
           weightKg,
-          quality,
+          qualityId,
           status: { in: LIVE_STATUSES },
         },
       });
@@ -390,7 +415,7 @@ async function bulkConfirmRows(userId, rows) {
         side: 'SELL',
         categoryId,
         commodityId,
-        quality,
+        qualityId,
         quantityBags,
         weightKg,
         // 0 on a new row = no price => createListing makes it `na`.
