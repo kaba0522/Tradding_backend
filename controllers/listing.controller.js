@@ -50,7 +50,7 @@ async function list(req, res, next) {
 async function getById(req, res, next) {
   try {
     const { id } = req.params;
-    const listing = await listingService.getListingById(id);
+    const listing = await listingService.getListingById(id, req.user);
     sendSuccess(res, 200, listing);
   } catch (err) {
     next(err);

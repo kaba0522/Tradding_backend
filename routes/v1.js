@@ -15,6 +15,8 @@ var listingsRouter = require('./listings');
 var usersRouter = require('./users');
 var freightRouter = require('./freight');
 var brokersRouter = require('./brokers');
+var commissionsRouter = require('./commissions');
+var tradesRouter = require('./trades');
 var mediaRouter = require('./media');
 var auditRouter = require('./audit');
 
@@ -30,6 +32,8 @@ router.use('/listings', listingsRouter);
 router.use('/users', usersRouter);
 router.use('/freight', freightRouter);
 router.use('/brokers', brokersRouter);
+router.use('/commissions', commissionsRouter);
+router.use('/trades', tradesRouter);
 router.use('/media', mediaRouter);
 router.use('/audit-logs', auditRouter);
 

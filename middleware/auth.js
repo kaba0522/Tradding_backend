@@ -40,6 +40,22 @@ function requireRole(allowedRoles) {
   };
 }
 
+// Role(s) that may look but not touch. A user is read-only when EVERY role they hold is
+// in `roles` (today: a broker, who only browses listings and reads their own trades),
+// so an account that is also a buyer/seller/admin is not affected. Safe methods pass;
+// anything that writes gets a 403 here, on the server, not just a hidden button.
+function readOnlyForRoles(roles) {
+  return (req, res, next) => {
+    const isReadOnlyUser =
+      req.user && req.user.roles.length > 0 && req.user.roles.every((role) => roles.includes(role));
+    const isSafeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if (isReadOnlyUser && !isSafeMethod) {
+      return next(new AppError('Your account has read-only access', 403));
+    }
+    next();
+  };
+}
+
 // CLAUDE.md §4.1.1: gate everything behind ToS acceptance except the ToS flow
 // itself (routes/tos.js, routes/tosVersions.js never apply this — otherwise a
 // user who hasn't accepted could never call /tos/accept to accept it).
@@ -68,4 +84,4 @@ async function requireTosAccepted(req, res, next) {
   }
 }
 
-module.exports = { authenticate, requireRole, requireTosAccepted };
+module.exports = { authenticate, requireRole, requireTosAccepted, readOnlyForRoles };

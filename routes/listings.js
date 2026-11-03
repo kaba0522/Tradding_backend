@@ -1,7 +1,7 @@
 var express = require('express');
 var router = express.Router();
 var multer = require('multer');
-var { authenticate, requireRole, requireTosAccepted } = require('../middleware/auth');
+var { authenticate, requireRole, requireTosAccepted, readOnlyForRoles } = require('../middleware/auth');
 var { AppError } = require('../lib/errors');
 var listingController = require('../controllers/listing.controller');
 var listingBulkController = require('../controllers/listing-bulk.controller');
@@ -41,6 +41,8 @@ function handleBulkUploadFile(req, res, next) {
 }
 
 router.use(authenticate, requireTosAccepted);
+// A broker browses listings but cannot create, edit, withdraw or bulk-upload any.
+router.use(readOnlyForRoles(['broker']));
 
 // Photo/video rules run before the existing create/update handlers (added, not edited).
 router.post('/', listingMedia.guardCreate);

@@ -3,7 +3,8 @@ var router = express.Router();
 var { authenticate, requireRole } = require('../middleware/auth');
 var inviteController = require('../controllers/invite.controller');
 
-router.use(authenticate, requireRole(['admin', 'broker']));
+// Only an admin invites people; a broker is invited automatically when the admin adds them.
+router.use(authenticate, requireRole(['admin']));
 
 router.post('/', inviteController.sendInvitation);
 router.get('/', inviteController.listInvitations);
