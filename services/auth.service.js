@@ -2,6 +2,7 @@ const ms = require('ms');
 const prisma = require('../lib/prisma');
 const { AppError } = require('../lib/errors');
 const otpService = require('./otp.service');
+const brokerService = require('./broker.service');
 const { validatePhone } = require('../lib/validators');
 const { signAccessToken, generateRefreshToken, hashToken } = require('../lib/tokens');
 
@@ -95,6 +96,12 @@ async function verifyOtp({ phone, otp }) {
         where: { id: invite.id },
         data: { status: 'accepted' },
       });
+
+      // A broker's invite also ties their new account to their broker row, so the
+      // user id in the token can be traced to trade.broker_id ("my trades").
+      if (invite.roleHint === 'broker') {
+        await brokerService.linkBrokerToUser(tx, createdUser);
+      }
 
       return createdUser;
     });

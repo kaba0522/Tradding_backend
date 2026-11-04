@@ -22,6 +22,16 @@ async function list(req, res, next) {
   }
 }
 
+// The trade-accept dropdown. Not paginated: it is the whole list of active brokers.
+async function options(req, res, next) {
+  try {
+    const brokers = await brokerService.listBrokerOptions();
+    sendSuccess(res, 200, brokers);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getById(req, res, next) {
   try {
     const broker = await brokerService.getBrokerById(req.params.id);
@@ -60,4 +70,24 @@ async function reactivate(req, res, next) {
   }
 }
 
-module.exports = { create, list, getById, update, remove, reactivate };
+async function listMyTrades(req, res, next) {
+  try {
+    const { status } = req.query;
+    const { page, limit, skip, take } = parsePagination(req.query);
+    const { data, total } = await brokerService.listOwnTrades(req.user.id, { status, skip, take });
+    sendSuccess(res, 200, data, buildMeta({ page, limit, total }));
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getMyTrade(req, res, next) {
+  try {
+    const trade = await brokerService.getOwnTrade(req.user.id, req.params.id);
+    sendSuccess(res, 200, trade);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { create, list, options, getById, update, remove, reactivate, listMyTrades, getMyTrade };

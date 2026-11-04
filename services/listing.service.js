@@ -247,6 +247,9 @@ async function getListings({
   const requestedNonPublicStatus = statuses.some((s) => s !== 'active');
 
   const isAdmin = requestingUser && requestingUser.roles.includes('admin');
+  if (isBrokerOnly(requestingUser) && side !== 'SELL') {
+    throw new AppError('Brokers can only view seller listings', 403);
+  }
   // Whoever HOLDS the role that owns this side's data treats it as private-by-
   // default: a seller owns SELL listings, a buyer owns BUY requirements. Anyone
   // else (the opposite role, or no matching role) is just browsing the market —
@@ -317,7 +320,12 @@ async function getListings({
   return { data: data.map(serializeListing), total };
 }
 
-async function getListingById(id) {
+// A user whose only role is broker: a read-only account that browses seller listings.
+function isBrokerOnly(user) {
+  return Boolean(user) && user.roles.length > 0 && user.roles.every((role) => role === 'broker');
+}
+
+async function getListingById(id, requestingUser) {
   validateUuid(id);
   const listing = await prisma.listing.findUnique({
     where: { id },
@@ -328,6 +336,9 @@ async function getListingById(id) {
   });
   if (!listing) {
     throw new AppError('Listing not found', 404);
+  }
+  if (isBrokerOnly(requestingUser) && listing.side !== 'SELL') {
+    throw new AppError('Brokers can only view seller listings', 403);
   }
   return serializeListing(listing);
 }

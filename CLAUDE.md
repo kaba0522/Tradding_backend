@@ -339,7 +339,9 @@ A **Freight page** is a top-level section of the app showing transport rates by 
   - A **dropdown of a finite broker list**.
   - An **open text field** to add a broker name not in the list.
   - A **"Self"** option selectable by buyer/seller (meaning no broker / direct).
-- Record broker per trade so brokerage can be attributed. *(Commission calculation/rate model — see Open Questions.)*
+- Record broker per trade so brokerage can be attributed.
+- **Commission (decided, built):** set by an admin **per commodity category only** (`category_commission`, one row per category, same for every broker): `per_bag` (₹ per bag — the "flat" rate) or `percent` (% of final price × bags). The **seller** pays it. No default rate: a category with no rate gives `commission_status = not_set` and an admin fills it in on that trade (audited). Self / free-text broker → `none`, ₹0. The result is copied onto the trade at confirm time (`commission_status/type/rate/amount/category_id`, plus `commission_set_by/at` when filled by hand), so later rate changes never alter past trades. Logic: `services/commission.service.js` (`resolveTradeCommission` is called inside the transaction that creates the trade — the trade-confirm API is not built yet).
+- **Broker lifecycle (built):** admin adds a broker with name + phone → a pending `broker` invite is created automatically and the broker is in the dropdown at once (`GET /brokers/options`, id + name only). First login accepts the invite, creates the app user (role `broker`) and sets `broker.user_id`. A broker is always a different person from any other user. A broker-only account is **read-only** (`readOnlyForRoles`) and sees seller listings plus its own trades (`GET /brokers/me/trades`).
 
 ### 4.10 Profile
 
@@ -433,8 +435,9 @@ Entities are intentionally commodity-agnostic and role-flexible.
   - **Note:** price is *per bag of `weight_kg`* when weight is set, otherwise a per-item rate. Do not assume a global unit — Sheet A mixes 30/35/45 KG bags, Sheet B has no weight.
 - **Negotiation**: `id, listing_id, buyer_id, seller_id, status (open|accepted|declined|voided|expired), created_at` — **enforce `buyer_id != seller_id`** (self-trade guard). `voided` = another negotiation on the same listing was accepted first; `expired` = 2 AM. See §5.
 - **Offer**: `id, negotiation_id, by_user_id, price, type (offer|counter|accept|decline|retract), status (pending|accepted|declined|countered|retracted|expired), created_at` — price only (MVP). Latest pending offer supersedes prior.
-- **Trade**: `id, negotiation_id, buyer_id, seller_id, commodity_id, quality, final_price, quantity?, broker_id? (nullable), broker_name_freetext? (nullable), is_self bool, payment_terms, confirmed_at`
-- **Broker**: `id, user_id?, name` (finite list; free-text names get captured on the trade)
+- **Trade**: `id, negotiation_id, buyer_id, seller_id, commodity_id, quality, final_price, quantity?, broker_id? (nullable), broker_name_freetext? (nullable), is_self bool, payment_terms, confirmed_at, commission_status (set|not_set|none), commission_type?, commission_rate?, commission_amount?, commission_category_id?, commission_set_by?, commission_set_at?`
+- **Broker**: `id, name, phone (unique), active, user_id? (set on first login), created_by, updated_by` (finite list; free-text names get captured on the trade). No commission on the broker — see **CategoryCommission**.
+- **CategoryCommission**: `id, category_id (unique), commission_type (per_bag|percent), rate, created_by, updated_by`
 - **FreightRoute**: `id, origin_name, destination_name, price_low, price_high (== price_low when single value), unit (default 'per_quintal'), truck_capacity? (e.g. '30-35 MT'), price_valid_until, status (active|price_expired), updated_by (admin), created_at, updated_at` — admin-published reference data; NOT a listing (no buyer/seller/negotiation/trade). Expires on its own `freight_expiry_time` setting. Unique per (origin, destination), case-insensitive.
 - **SourceTemplate** (Phase 2, generalizes SupplierTemplate): learned parse template per **source** — a supplier sheet OR the freight sheet. Same teach-once/fast-parse-daily idea (§4.8).
 - **Setting**: `key, value` (e.g., `price_expiry_time = 02:00`, timezone `Asia/Kolkata`)
@@ -492,7 +495,7 @@ Entities are intentionally commodity-agnostic and role-flexible.
 1. **Quantity per trade:** The sheets have no quantity (they're price lists). When a deal closes, do we capture **how many bags** are being traded? **Kept open per founder — but both the Buyer and Seller design prototypes already capture quantity (bags), so this is leaning strongly toward "yes, required".** Confirm, and confirm whether buyers specify quantity when posting a requirement.
 2. **Yellow highlighting:** What does a yellow-highlighted row mean on Sheet A (featured / changed today / hot / low stock)? Determines whether we add an `is_featured`/flag field.
 3. **Supplier sub-entities:** Kunj Bihari lists under 5 business entities on one sheet. Do buyers see/care about the sub-entity, or does the app flatten everything to one supplier? Affects whether `SubEntity` ships in MVP.
-4. **Commission model:** Is brokerage a %, flat fee per bag, or just recorded (calculated offline)? Who pays — buyer, seller, or split?
+4. ~~**Commission model**~~ → **Decided: per commodity category, ₹ per bag or % of trade value, paid by the seller, admin-set, snapshotted on each trade (§4.6).**
 6. **Visibility:** Can every buyer see every seller's listings (open pool), or is visibility scoped (by broker, region, or invite group)?
 7. **Trade settlement:** Does the app track payment/delivery status after a trade is confirmed (the sheet emphasizes payment timelines heavily), or does it stop at "trade agreed"?
 8. **WhatsApp login:** Confirm appetite for WhatsApp Business API onboarding (cost/approval overhead) vs. plain SMS OTP for MVP.
