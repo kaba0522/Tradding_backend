@@ -10,6 +10,9 @@ const {
   computeNextExpiryCutoff,
   getOwnerDefaultPaymentTerms,
   resolvePaymentTerms,
+  parseSide,
+  writeAdminListingAudit,
+  LISTING_INCLUDE,
 } = require('./listing.service');
 const {
   optionalString,
@@ -21,9 +24,16 @@ const {
 
 const FUZZY_THRESHOLD = 0.6;
 const TEMPLATE_DATA_ROWS = 500;
+// One upload/confirm handles at most what the template holds.
+const MAX_BULK_ROWS = TEMPLATE_DATA_ROWS;
 // Must match the partial unique index's WHERE clause (uq_listing_no_duplicate_sell,
 // last rebuilt in the quality_by_category migration).
 const LIVE_STATUSES = ['active', 'na', 'price_expired'];
+// A buy requirement has no price, so it is never `na` / `price_expired` — only
+// `active` is live. There is no DB unique index for BUY; the match below is code-only.
+const BUY_LIVE_STATUSES = ['active'];
+// Fields a buy requirement does not have; a value in any of them fails the row.
+const SELL_ONLY_FIELDS = ['weightKg', 'price', 'paymentTerms', 'notes', 'moisture', 'color', 'size'];
 
 const COLUMNS = [
   { header: 'Category', key: 'category', width: 20 },
@@ -38,6 +48,22 @@ const COLUMNS = [
   { header: 'Color', key: 'color', width: 12 },
   { header: 'Size', key: 'size', width: 12 },
 ];
+// A buy requirement is only these four: Category, Commodity, Quality, Quantity (Bags).
+const BUY_COLUMNS = COLUMNS.slice(0, 4);
+
+// The Excel flow is per file: the whole sheet is either SELL listings or BUY
+// requirements. Absent => SELL (the behaviour before BUY uploads existed).
+function parseBulkSide(side) {
+  return side === undefined || side === null || side === '' ? 'SELL' : parseSide(side);
+}
+
+function columnsFor(side) {
+  return side === 'BUY' ? BUY_COLUMNS : COLUMNS;
+}
+
+function hasValue(value) {
+  return value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '');
+}
 
 function normalize(value) {
   return typeof value === 'string' ? value.trim().toLowerCase().replace(/\s+/g, ' ') : '';
@@ -85,7 +111,7 @@ function tryValidate(errors, fn) {
   }
 }
 
-async function generateTemplateWorkbook() {
+async function generateTemplateWorkbook(side = 'SELL') {
   const [categories, commodities, qualities] = await Promise.all([
     prisma.commodityCategory.findMany({ orderBy: { name: 'asc' } }),
     prisma.commodity.findMany({ orderBy: { name: 'asc' } }),
@@ -146,8 +172,8 @@ async function generateTemplateWorkbook() {
     pivotTables: false,
   });
 
-  const sheet = workbook.addWorksheet('Listings');
-  sheet.columns = COLUMNS;
+  const sheet = workbook.addWorksheet(side === 'BUY' ? 'Requirements' : 'Listings');
+  sheet.columns = columnsFor(side);
 
   const categoryRange = `_lists!$A$1:$A$${Math.max(categories.length, 1)}`;
 
@@ -181,7 +207,29 @@ async function generateTemplateWorkbook() {
   return workbook;
 }
 
-async function parseUploadedWorkbook(buffer, userId) {
+// The SELL template has a Price column, the BUY template does not. Uploading one
+// template with the other side selected would silently read the wrong columns, so
+// it is rejected up front.
+function checkTemplateMatchesSide(sheet, side) {
+  const headers = (sheet.getRow(1).values || []).slice(1).map(normalize);
+  const isSellTemplate = headers.includes('price');
+  if (side === 'BUY' && isSellTemplate) {
+    throw new AppError(
+      'This file is the sell-listing template — download the buy-requirement template (side=BUY) or upload with side=SELL',
+      400
+    );
+  }
+  if (side === 'SELL' && !isSellTemplate) {
+    throw new AppError(
+      'This file is not the sell-listing template (no Price column) — download the template for side=SELL, or upload buy requirements with side=BUY',
+      400
+    );
+  }
+}
+
+// userId = the listing owner (the seller/buyer; for an admin upload, the user the
+// admin picked). byAdmin only changes error wording — the profile is the owner's.
+async function parseUploadedWorkbook(buffer, userId, side = 'SELL', { byAdmin = false } = {}) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
   // NOT worksheets[0] — the template's hidden `_lists` sheet is created first, so
@@ -193,12 +241,14 @@ async function parseUploadedWorkbook(buffer, userId) {
   if (!sheet) {
     throw new AppError('Uploaded file has no worksheet', 400);
   }
+  checkTemplateMatchesSide(sheet, side);
+  const isBuy = side === 'BUY';
 
   const [categories, commodities, qualities, userDefaultPaymentTerms] = await Promise.all([
     prisma.commodityCategory.findMany(),
     prisma.commodity.findMany(),
     prisma.quality.findMany(),
-    getOwnerDefaultPaymentTerms(userId),
+    isBuy ? null : getOwnerDefaultPaymentTerms(userId),
   ]);
 
   const rows = [];
@@ -211,20 +261,30 @@ async function parseUploadedWorkbook(buffer, userId) {
     if (isEmpty) {
       continue;
     }
+    if (rows.length >= MAX_BULK_ROWS) {
+      throw new AppError(`A file can contain at most ${MAX_BULK_ROWS} rows`, 400);
+    }
 
-    const raw = {
-      category: cells[1],
-      commodity: cells[2],
-      quality: cells[3],
-      quantityBags: cells[4],
-      weightKg: cells[5],
-      price: cells[6],
-      paymentTerms: cells[7],
-      notes: cells[8],
-      moisture: cells[9],
-      color: cells[10],
-      size: cells[11],
-    };
+    const raw = isBuy
+      ? {
+          category: cells[1],
+          commodity: cells[2],
+          quality: cells[3],
+          quantityBags: cells[4],
+        }
+      : {
+          category: cells[1],
+          commodity: cells[2],
+          quality: cells[3],
+          quantityBags: cells[4],
+          weightKg: cells[5],
+          price: cells[6],
+          paymentTerms: cells[7],
+          notes: cells[8],
+          moisture: cells[9],
+          color: cells[10],
+          size: cells[11],
+        };
 
     const errors = [];
 
@@ -249,15 +309,26 @@ async function parseUploadedWorkbook(buffer, userId) {
     }
 
     const quantityBags = tryValidate(errors, () => requirePositiveInt(raw.quantityBags, 'quantityBags'));
-    const weightKg = tryValidate(errors, () => optionalPositiveInt(raw.weightKg, 'weightKg'));
-    // blank => null (no price given); 0 => explicit "clear the price" (row goes `na`).
-    const price = tryValidate(errors, () => optionalNonNegativeDecimal(raw.price, 'price'));
-    // undefined => the cell was invalid (error already recorded); null => blank cell.
-    const paymentTerms = tryValidate(errors, () => optionalNonNegativeInt(raw.paymentTerms, 'paymentTerms'));
-    const notes = tryValidate(errors, () => optionalString(raw.notes, 'notes'));
-    const moisture = tryValidate(errors, () => optionalString(raw.moisture, 'moisture'));
-    const color = tryValidate(errors, () => optionalString(raw.color, 'color'));
-    const size = tryValidate(errors, () => optionalString(raw.size, 'size'));
+    // A BUY row has none of the SELL-only columns: they stay null and are left out
+    // of `resolved` below.
+    let weightKg = null;
+    let price = null;
+    let paymentTerms = null;
+    let notes = null;
+    let moisture = null;
+    let color = null;
+    let size = null;
+    if (!isBuy) {
+      weightKg = tryValidate(errors, () => optionalPositiveInt(raw.weightKg, 'weightKg'));
+      // blank => null (no price given); 0 => explicit "clear the price" (row goes `na`).
+      price = tryValidate(errors, () => optionalNonNegativeDecimal(raw.price, 'price'));
+      // undefined => the cell was invalid (error already recorded); null => blank cell.
+      paymentTerms = tryValidate(errors, () => optionalNonNegativeInt(raw.paymentTerms, 'paymentTerms'));
+      notes = tryValidate(errors, () => optionalString(raw.notes, 'notes'));
+      moisture = tryValidate(errors, () => optionalString(raw.moisture, 'moisture'));
+      color = tryValidate(errors, () => optionalString(raw.color, 'color'));
+      size = tryValidate(errors, () => optionalString(raw.size, 'size'));
+    }
 
     const commodityRecord = commodityMatch.id ? commodities.find((c) => c.id === commodityMatch.id) : null;
     const qualityRecord = qualityMatch.id ? qualities.find((q) => q.id === qualityMatch.id) : null;
@@ -265,17 +336,11 @@ async function parseUploadedWorkbook(buffer, userId) {
     let willUpdateExisting = null;
     let existingPaymentTerms = null;
     if (categoryMatch.id && commodityMatch.id && errors.length === 0) {
-      const existing = await prisma.listing.findFirst({
-        where: {
-          userId,
-          side: 'SELL',
-          categoryId: categoryMatch.id,
-          commodityId: commodityMatch.id,
-          weightKg: weightKg ?? null,
-          qualityId: qualityMatch.id,
-          status: { in: LIVE_STATUSES },
-        },
-        select: { id: true, paymentTerms: true },
+      const existing = await findExistingForRow(userId, side, {
+        categoryId: categoryMatch.id,
+        commodityId: commodityMatch.id,
+        qualityId: qualityMatch.id,
+        weightKg: weightKg ?? null,
       });
       willUpdateExisting = existing ? existing.id : null;
       existingPaymentTerms = existing ? existing.paymentTerms : null;
@@ -285,7 +350,7 @@ async function parseUploadedWorkbook(buffer, userId) {
     // listing that will be updated) the listing's current value, else the profile default.
     let effectivePaymentTerms = null;
     let paymentTermsSource = null;
-    if (paymentTerms !== undefined) {
+    if (!isBuy && paymentTerms !== undefined) {
       if (paymentTerms !== null) {
         effectivePaymentTerms = paymentTerms;
         paymentTermsSource = 'row';
@@ -296,7 +361,11 @@ async function parseUploadedWorkbook(buffer, userId) {
         effectivePaymentTerms = userDefaultPaymentTerms;
         paymentTermsSource = 'profile_default';
       } else {
-        errors.push('paymentTerms missing — enter it in the sheet or set default payment terms in your profile');
+        errors.push(
+          byAdmin
+            ? 'paymentTerms missing — this seller has no default payment terms, enter it in the sheet'
+            : 'paymentTerms missing — enter it in the sheet or set default payment terms in your profile'
+        );
       }
     }
 
@@ -306,22 +375,22 @@ async function parseUploadedWorkbook(buffer, userId) {
       readyRows += 1;
     }
 
-    rows.push({
-      rowIndex: rowNumber,
-      raw,
-      resolved: {
-        categoryId: categoryMatch.id,
-        categoryMatch: categoryMatch.match,
-        categorySuggestion: categoryMatch.suggestion,
-        commodityId: commodityMatch.id,
-        commodityMatch: commodityMatch.match,
-        commoditySuggestion: commodityMatch.suggestion,
-        itemName: commodityRecord ? commodityRecord.name : null,
-        qualityId: qualityMatch.id,
-        qualityMatch: qualityMatch.match,
-        qualitySuggestion: qualityMatch.suggestion,
-        quality: qualityRecord ? qualityRecord.name : null,
-        quantityBags: quantityBags ?? null,
+    const resolved = {
+      categoryId: categoryMatch.id,
+      categoryMatch: categoryMatch.match,
+      categorySuggestion: categoryMatch.suggestion,
+      commodityId: commodityMatch.id,
+      commodityMatch: commodityMatch.match,
+      commoditySuggestion: commodityMatch.suggestion,
+      itemName: commodityRecord ? commodityRecord.name : null,
+      qualityId: qualityMatch.id,
+      qualityMatch: qualityMatch.match,
+      qualitySuggestion: qualityMatch.suggestion,
+      quality: qualityRecord ? qualityRecord.name : null,
+      quantityBags: quantityBags ?? null,
+    };
+    if (!isBuy) {
+      Object.assign(resolved, {
         weightKg: weightKg ?? null,
         price: price ?? null,
         paymentTerms: effectivePaymentTerms,
@@ -330,7 +399,13 @@ async function parseUploadedWorkbook(buffer, userId) {
         moisture: moisture ?? null,
         color: color ?? null,
         size: size ?? null,
-      },
+      });
+    }
+
+    rows.push({
+      rowIndex: rowNumber,
+      raw,
+      resolved,
       willUpdateExisting,
       errors,
       ready,
@@ -343,15 +418,39 @@ async function parseUploadedWorkbook(buffer, userId) {
   };
 }
 
-async function bulkConfirmRows(userId, rows) {
+// The live listing a row would update instead of creating a new one.
+//  SELL: same category + commodity + weight + quality (backed by the DB unique index).
+//  BUY:  same category + commodity + quality (no weight on BUY; code-only match). If
+//        older duplicates exist, the newest one is updated.
+function findExistingForRow(userId, side, { categoryId, commodityId, qualityId, weightKg }) {
+  if (side === 'BUY') {
+    return prisma.listing.findFirst({
+      where: { userId, side: 'BUY', categoryId, commodityId, qualityId, status: { in: BUY_LIVE_STATUSES } },
+      orderBy: { createdAt: 'desc' },
+      include: LISTING_INCLUDE,
+    });
+  }
+  return prisma.listing.findFirst({
+    where: { userId, side: 'SELL', categoryId, commodityId, weightKg, qualityId, status: { in: LIVE_STATUSES } },
+    include: LISTING_INCLUDE,
+  });
+}
+
+// userId = the listing owner. adminActorId is set when an admin confirms on the
+// owner's behalf: every created/updated listing then gets an AuditLog entry.
+async function bulkConfirmRows(userId, rows, side = 'SELL', { adminActorId = null } = {}) {
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new AppError('rows must be a non-empty array', 400);
   }
+  if (rows.length > MAX_BULK_ROWS) {
+    throw new AppError(`rows can contain at most ${MAX_BULK_ROWS} items`, 400);
+  }
+  const byAdmin = adminActorId !== null;
 
   const created = [];
   const updated = [];
   const failed = [];
-  const userDefaultPaymentTerms = await getOwnerDefaultPaymentTerms(userId);
+  const userDefaultPaymentTerms = side === 'SELL' ? await getOwnerDefaultPaymentTerms(userId) : null;
 
   for (const row of rows) {
     const rowIndex = row.rowIndex;
@@ -365,6 +464,34 @@ async function bulkConfirmRows(userId, rows) {
       await fetchQuality(categoryId, qualityId);
 
       const quantityBags = requirePositiveInt(row.quantityBags, 'quantityBags');
+
+      if (side === 'BUY') {
+        const sellOnly = SELL_ONLY_FIELDS.find((field) => hasValue(row[field]));
+        if (sellOnly) {
+          throw new AppError(`${sellOnly} is not allowed on a buy requirement`, 400);
+        }
+        const existing = await findExistingForRow(userId, 'BUY', { categoryId, commodityId, qualityId });
+        if (existing) {
+          const listing = await prisma.listing.update({
+            where: { id: existing.id },
+            data: { quantityBags, availabilityBags: quantityBags },
+            include: LISTING_INCLUDE,
+          });
+          if (byAdmin) {
+            await writeAdminListingAudit('LISTING_UPDATED_BY_ADMIN', adminActorId, existing, listing);
+          }
+          updated.push({ rowIndex, listingId: listing.id });
+          continue;
+        }
+        const listing = await createListing(
+          userId,
+          { side: 'BUY', categoryId, commodityId, qualityId, quantityBags },
+          { adminActorId }
+        );
+        created.push({ rowIndex, listingId: listing.id });
+        continue;
+      }
+
       const weightKg = optionalPositiveInt(row.weightKg, 'weightKg');
       const price = optionalNonNegativeDecimal(row.price, 'price');
       const paymentTerms = optionalNonNegativeInt(row.paymentTerms, 'paymentTerms');
@@ -373,24 +500,18 @@ async function bulkConfirmRows(userId, rows) {
       const color = optionalString(row.color, 'color');
       const size = optionalString(row.size, 'size');
 
-      const existing = await prisma.listing.findFirst({
-        where: {
-          userId,
-          side: 'SELL',
-          categoryId,
-          commodityId,
-          weightKg,
-          qualityId,
-          status: { in: LIVE_STATUSES },
-        },
-      });
+      const existing = await findExistingForRow(userId, 'SELL', { categoryId, commodityId, qualityId, weightKg });
 
       if (existing) {
         const data = {
           quantityBags,
           availabilityBags: quantityBags,
           // Blank cell keeps the listing's current terms (was: overwritten with null).
-          paymentTerms: resolvePaymentTerms(paymentTerms ?? existing.paymentTerms, userDefaultPaymentTerms),
+          paymentTerms: resolvePaymentTerms(
+            paymentTerms ?? existing.paymentTerms,
+            userDefaultPaymentTerms,
+            byAdmin
+          ),
           notes,
           moisture,
           color,
@@ -406,26 +527,33 @@ async function bulkConfirmRows(userId, rows) {
           data.status = 'active';
           data.priceValidUntil = await computeNextExpiryCutoff();
         }
-        const listing = await prisma.listing.update({ where: { id: existing.id }, data });
+        const listing = await prisma.listing.update({ where: { id: existing.id }, data, include: LISTING_INCLUDE });
+        if (byAdmin) {
+          await writeAdminListingAudit('LISTING_UPDATED_BY_ADMIN', adminActorId, existing, listing);
+        }
         updated.push({ rowIndex, listingId: listing.id });
         continue;
       }
 
-      const listing = await createListing(userId, {
-        side: 'SELL',
-        categoryId,
-        commodityId,
-        qualityId,
-        quantityBags,
-        weightKg,
-        // 0 on a new row = no price => createListing makes it `na`.
-        price: price === 0 ? null : price,
-        paymentTerms: resolvePaymentTerms(paymentTerms, userDefaultPaymentTerms),
-        notes,
-        moisture,
-        color,
-        size,
-      });
+      const listing = await createListing(
+        userId,
+        {
+          side: 'SELL',
+          categoryId,
+          commodityId,
+          qualityId,
+          quantityBags,
+          weightKg,
+          // 0 on a new row = no price => createListing makes it `na`.
+          price: price === 0 ? null : price,
+          paymentTerms: resolvePaymentTerms(paymentTerms, userDefaultPaymentTerms, byAdmin),
+          notes,
+          moisture,
+          color,
+          size,
+        },
+        { adminActorId }
+      );
       created.push({ rowIndex, listingId: listing.id });
     } catch (err) {
       failed.push({ rowIndex, reason: err.message || 'Unknown error' });
@@ -436,6 +564,7 @@ async function bulkConfirmRows(userId, rows) {
 }
 
 module.exports = {
+  parseBulkSide,
   generateTemplateWorkbook,
   parseUploadedWorkbook,
   bulkConfirmRows,
