@@ -4,6 +4,20 @@ const { validateUuid } = require('../lib/validators');
 const MAX_FILTER_LENGTH = 100;
 const MAX_ACTIONS = 20;
 
+const ACTOR_ROLES = ['admin', 'broker', 'seller', 'buyer'];
+
+// Groups the `entity` values the services write into the admin panel's
+// "Category" dropdown. A new audited entity only needs a line here.
+const AUDIT_CATEGORIES = {
+  users: ['AppUser', 'Invite'],
+  listings: ['Listing'],
+  brokers: ['Broker'],
+  commission: ['CategoryCommission', 'Trade'],
+  taxonomy: ['CommodityCategory', 'Commodity', 'Quality'],
+  freight: ['FreightRoute'],
+  settings: ['Setting', 'TosVersion'],
+};
+
 function optionalString(value, fieldName) {
   if (value === undefined || value === '') return undefined;
   if (typeof value !== 'string') {
@@ -24,6 +38,24 @@ function optionalDate(value, fieldName) {
     throw new AppError(`${fieldName} must be a valid date`, 400);
   }
   return date;
+}
+
+function optionalOneOf(value, fieldName, allowed) {
+  const raw = optionalString(value, fieldName);
+  if (raw === undefined) return undefined;
+  if (!allowed.includes(raw)) {
+    throw new AppError(`${fieldName} must be one of: ${allowed.join(', ')}`, 400);
+  }
+  return raw;
+}
+
+function optionalBoolean(value, fieldName) {
+  const raw = optionalString(value, fieldName);
+  if (raw === undefined) return undefined;
+  if (raw !== 'true' && raw !== 'false') {
+    throw new AppError(`${fieldName} must be true or false`, 400);
+  }
+  return raw === 'true';
 }
 
 // Turns the raw query string into a clean filter object. `action` may be a
@@ -53,7 +85,18 @@ function parseListFilters(query = {}) {
     throw new AppError('from must not be after to', 400);
   }
 
+  filters.actorRole = optionalOneOf(query.actorRole, 'actorRole', ACTOR_ROLES);
+
+  const category = optionalOneOf(query.category, 'category', Object.keys(AUDIT_CATEGORIES));
+  if (category) filters.categoryEntities = AUDIT_CATEGORIES[category];
+
+  // Only `true` narrows the list; `false` is the same as not sending it.
+  if (optionalBoolean(query.onBehalf, 'onBehalf')) filters.onBehalf = true;
+
+  const targetUserId = optionalString(query.targetUserId, 'targetUserId');
+  if (targetUserId) filters.targetUserId = validateUuid(targetUserId, 'targetUserId');
+
   return filters;
 }
 
-module.exports = { parseListFilters };
+module.exports = { parseListFilters, AUDIT_CATEGORIES, ACTOR_ROLES };

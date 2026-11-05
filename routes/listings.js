@@ -56,6 +56,7 @@ router.get('/:id', listingController.getById);
 // Must come before '/:id' — otherwise Express would match "bulk-price" as :id.
 router.patch('/bulk-price', listingController.bulkPrice);
 router.patch('/:id/withdraw', listingController.withdraw);
+router.patch('/:id/restore', listingController.restore);
 router.patch('/:id/force-expire', requireRole(['admin']), listingController.forceExpire);
 router.patch('/:id', listingController.update);
 router.post('/bulk-upload', handleBulkUploadFile, listingBulkController.bulkUpload);

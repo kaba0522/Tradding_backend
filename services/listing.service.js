@@ -444,6 +444,14 @@ async function updateListing(id, userId, body, requestingUser) {
     throw new AppError('Listing not found', 404);
   }
   const { byAdmin } = resolveListingAccess(existing, userId, requestingUser);
+  // A withdrawn listing comes back only through PATCH /:id/restore; a traded one is
+  // final. (Before this check, sending a price here silently re-activated both.)
+  if (existing.status === 'traded') {
+    throw new AppError('A traded listing cannot be edited', 409);
+  }
+  if (existing.status === 'withdrawn') {
+    throw new AppError('A withdrawn listing cannot be edited — restore it first (PATCH /listings/:id/restore)', 409);
+  }
   // Defaults (payment terms) belong to the listing's owner, not to the admin editing it.
   const ownerId = existing.userId;
 
@@ -698,6 +706,58 @@ async function withdrawListing(id, userId, requestingUser) {
   return serializeListing(updated);
 }
 
+// PATCH /listings/:id/restore — the only way back from `withdrawn` (owner or admin,
+// same access as withdraw). A SELL listing's old price may be days stale, so it is
+// never revived: send a fresh price to come back `active` (new expiry), or none / 0
+// to come back `na`. A BUY requirement has no price and comes back `active`.
+async function restoreListing(id, userId, body, requestingUser) {
+  validateUuid(id);
+  const existing = await prisma.listing.findUnique({ where: { id }, include: LISTING_INCLUDE });
+  if (!existing) {
+    throw new AppError('Listing not found', 404);
+  }
+  const { byAdmin } = resolveListingAccess(existing, userId, requestingUser);
+  if (existing.status === 'traded') {
+    throw new AppError('A traded listing cannot be restored', 409);
+  }
+  if (existing.status !== 'withdrawn') {
+    throw new AppError('Only a withdrawn listing can be restored', 409);
+  }
+
+  const price = body.price === undefined || body.price === null ? null : body.price;
+  let data;
+  if (existing.side === 'BUY') {
+    if (price !== null) {
+      throw new AppError('price is not allowed on a buy requirement', 400);
+    }
+    data = { status: 'active' };
+  } else {
+    const parsed = price === null ? 0 : requireNonNegativeDecimal(price, 'price');
+    data =
+      parsed === 0
+        ? { ...NA_PRICE_FIELDS }
+        : { price: parsed, status: 'active', priceValidUntil: await computeNextExpiryCutoff() };
+  }
+
+  let updated;
+  try {
+    updated = await prisma.listing.update({ where: { id }, data, include: LISTING_INCLUDE });
+  } catch (err) {
+    if (err.code === 'P2002') {
+      // A new live listing for the same item was created after this one was withdrawn.
+      throw new AppError(
+        'A live listing with this same category, commodity, weight and quality already exists — edit that one instead',
+        409
+      );
+    }
+    throw err;
+  }
+  if (byAdmin) {
+    await writeAdminListingAudit('LISTING_RESTORED_BY_ADMIN', userId, existing, updated);
+  }
+  return serializeListing(updated);
+}
+
 // Admin-only (enforced by the route). Same effect as the daily expiry job on one
 // row: `active` -> `price_expired`, price left untouched (sticky rule). A BUY
 // requirement has no price, so it can't expire.
@@ -731,6 +791,7 @@ module.exports = {
   updateListing,
   bulkUpdatePrice,
   withdrawListing,
+  restoreListing,
   forceExpireListing,
   computeNextExpiryCutoff,
   // Exported for reuse by listing-bulk.service.js.

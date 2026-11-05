@@ -23,8 +23,18 @@ async function updateMe(req, res, next) {
 async function list(req, res, next) {
   try {
     const { page, limit, skip, take } = parsePagination(req.query);
-    const { search, role, status } = req.query;
-    const { data, total } = await userService.listUsers({ search, role, status, skip, take });
+    const { search, role, status, sort, lastLoginFrom, lastLoginTo, inactiveDays } = req.query;
+    const { data, total } = await userService.listUsers({
+      search,
+      role,
+      status,
+      sort,
+      lastLoginFrom,
+      lastLoginTo,
+      inactiveDays,
+      skip,
+      take,
+    });
     sendSuccess(res, 200, data, buildMeta({ page, limit, total }));
   } catch (err) {
     next(err);

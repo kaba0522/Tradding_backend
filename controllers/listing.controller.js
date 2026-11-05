@@ -86,6 +86,16 @@ async function withdraw(req, res, next) {
   }
 }
 
+async function restore(req, res, next) {
+  try {
+    const { id } = req.params;
+    const listing = await listingService.restoreListing(id, req.user.id, req.body || {}, req.user);
+    sendSuccess(res, 200, listing);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function forceExpire(req, res, next) {
   try {
     const { id } = req.params;
@@ -96,4 +106,4 @@ async function forceExpire(req, res, next) {
   }
 }
 
-module.exports = { create, list, getById, update, bulkPrice, withdraw, forceExpire };
+module.exports = { create, list, getById, update, bulkPrice, withdraw, restore, forceExpire };

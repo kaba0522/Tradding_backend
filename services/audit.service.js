@@ -1,8 +1,13 @@
 const prisma = require('../lib/prisma');
 const { AppError } = require('../lib/errors');
 const { validateUuid } = require('../lib/validators');
+const { AUDIT_CATEGORIES } = require('./audit.validation');
 
-const ACTOR_SELECT = { id: true, name: true, phone: true, firmName: true };
+const ACTOR_SELECT = { id: true, name: true, phone: true, firmName: true, roles: true };
+
+// Entities whose before/after snapshot carries the owning user's id as `userId`
+// (a listing's owner, a broker's linked app account).
+const ENTITIES_WITH_USER_ID = ['Listing', 'Broker'];
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -19,26 +24,55 @@ function changedFields(before, after) {
   return [...keys].filter((key) => JSON.stringify(b[key]) !== JSON.stringify(a[key]));
 }
 
+// Rows about one user's data: the user row itself, or a listing/broker whose
+// snapshot (either side, so creates and withdrawals both match) names them.
+function targetUserCondition(userId) {
+  return {
+    OR: [
+      { entity: 'AppUser', entityId: userId },
+      ...ENTITIES_WITH_USER_ID.map((entity) => ({
+        entity,
+        OR: [
+          { after: { path: ['userId'], equals: userId } },
+          { before: { path: ['userId'], equals: userId } },
+        ],
+      })),
+    ],
+  };
+}
+
+// Every filter is its own AND clause, so two filters on the same column
+// (entity + category, q + targetUserId) narrow together instead of one
+// overwriting the other.
 function buildWhere(filters) {
-  const where = {};
-  if (filters.actorUserId) where.actorUserId = filters.actorUserId;
-  if (filters.actions) where.action = { in: filters.actions };
-  if (filters.entity) where.entity = filters.entity;
-  if (filters.entityId) where.entityId = filters.entityId;
+  const and = [];
+  if (filters.actorUserId) and.push({ actorUserId: filters.actorUserId });
+  if (filters.actions) and.push({ action: { in: filters.actions } });
+  if (filters.entity) and.push({ entity: filters.entity });
+  if (filters.entityId) and.push({ entityId: filters.entityId });
+  if (filters.categoryEntities) and.push({ entity: { in: filters.categoryEntities } });
+  if (filters.actorRole) and.push({ actor: { roles: { has: filters.actorRole } } });
+  if (filters.onBehalf) and.push({ action: { endsWith: '_BY_ADMIN' } });
+  if (filters.targetUserId) and.push(targetUserCondition(filters.targetUserId));
 
   if (filters.from || filters.to) {
-    where.createdAt = {};
-    if (filters.from) where.createdAt.gte = filters.from;
-    if (filters.to) where.createdAt.lte = filters.to;
+    const createdAt = {};
+    if (filters.from) createdAt.gte = filters.from;
+    if (filters.to) createdAt.lte = filters.to;
+    and.push({ createdAt });
   }
 
   if (filters.q) {
-    where.OR = [
-      { action: { contains: filters.q, mode: 'insensitive' } },
-      { entityId: { contains: filters.q, mode: 'insensitive' } },
-    ];
+    const contains = { contains: filters.q, mode: 'insensitive' };
+    and.push({
+      OR: [
+        { action: contains },
+        { entityId: contains },
+        { actor: { OR: [{ name: contains }, { firmName: contains }, { phone: contains }] } },
+      ],
+    });
   }
-  return where;
+  return and.length ? { AND: and } : {};
 }
 
 // List rows omit before/after (they can be large, e.g. freight bulk upload);
@@ -94,7 +128,8 @@ async function getFilterOptions() {
     actions: actions.map((a) => a.action),
     entities: entities.map((e) => e.entity),
     actors,
+    categories: Object.keys(AUDIT_CATEGORIES),
   };
 }
 
-module.exports = { listAuditLogs, getAuditLog, getFilterOptions, changedFields };
+module.exports = { listAuditLogs, getAuditLog, getFilterOptions, changedFields, buildWhere };

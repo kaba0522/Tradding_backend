@@ -185,6 +185,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 1. **User & access management**
    - Invite users by phone number; revoke/cancel invites.
    - View all users, their role(s)/modes, active status, and who invited them.
+   - **Last login (built, no schema change):** `GET /users` returns `lastLoginAt` = newest `refresh_token.created_at` (one is issued per OTP login, none deleted). It is the last *sign-in*, not last app use (token refresh isn't recorded). Filters `lastLoginFrom`, `lastLoginTo`, `inactiveDays=N`; `sort=lastLogin` (newest first; ranked in memory) or `name` (default).
    - Assign/adjust roles; (later) suspend or block a bad actor.
 
 2. **Listings oversight**
@@ -193,6 +194,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
    - **Edit price/details on behalf** of a user who calls in (writes to `AuditLog`).
    - **Create on behalf (built):** an admin never owns listings. `POST /listings`, `POST /listings/bulk-upload` (form field) and `POST /listings/bulk-confirm` take `ownerUserId` — **required for an admin** (400 if missing or the admin's own id), **403 for anyone else** naming another user. The owner must exist, be `active`, and hold `seller` (SELL) / `buyer` (BUY); checks re-run on bulk-confirm. The listing belongs to the owner (payment terms come from the owner's profile default); every admin create/update writes `LISTING_CREATED_BY_ADMIN` / `LISTING_UPDATED_BY_ADMIN` to `AuditLog` (no extra listing column). Only users who have logged in at least once can be picked (an `app_user` row is created on first OTP login). Picker: `GET /users` (admin-only; `search` name/firm/phone, `role`, `status` default active; without `role` lists buyers + sellers). Bulk price edit (`PATCH /listings/bulk-price`) is still own-listings only.
    - **Excel bulk, both sides (built):** the whole file is one `side` (`SELL` default, or `BUY`) — no per-row side column. `GET /listings/template?side=BUY` gives a 4-column template (Category, Commodity, Quality, Quantity (Bags)); uploading one template with the other side is rejected (detected by the Price header). BUY rows with price/weight/paymentTerms/notes/moisture/color/size fail. A BUY row matching a live requirement of the same owner (category + commodity + quality) updates its quantity, else creates one (code-only match, no DB index). Max 500 rows per upload/confirm.
+   - **Withdraw / restore (built):** `PATCH /listings/:id/withdraw` → `withdrawn` (row kept, hidden from browse). `PATCH /listings/:id/restore` (owner or admin; admin → `LISTING_RESTORED_BY_ADMIN`) is the **only** way back: SELL with a fresh `price` → `active` + new expiry, no price / 0 → `na` (the old price is never revived); BUY → `active` (price → 400). 409 if not withdrawn, if `traded`, or if a new live copy of the same item now exists (unique index). `PATCH /listings/:id` rejects `withdrawn` and `traded` rows with 409 (before, sending a price silently re-activated them). **`traded` is final** — no edit, withdraw or restore.
    - Force-expire or remove a listing.
 
 3. **Negotiations (live visibility + nudge)** — *father explicitly wants this*
@@ -216,6 +218,7 @@ The Browse tab has a **header toggle with two grouping modes of the same underly
 
 7. **Audit log**
    - Surface the `AuditLog` — every admin edit-on-behalf and nudge, with actor, before/after, timestamp. Essential because **multiple admins** can act.
+   - **Filters (built, `GET /audit-logs`, all optional, ANDed):** `actorUserId`, `action` (comma list), `entity`, `entityId`, `from`/`to`, `q` (action, entityId, actor name/firm/phone), `actorRole` (actor's *current* roles), `category` (users/listings/brokers/commission/taxonomy/freight/settings → entity list in `AUDIT_CATEGORIES`, `services/audit.validation.js` — add a new audited entity there), `onBehalf=true` (`*_BY_ADMIN` actions), `targetUserId` (the user's own `AppUser` rows + listing/broker snapshots whose `userId` is them). `GET /audit-logs/filters` returns actions, entities, actors (with `roles`) and categories. Sellers/buyers are never actors today — only admin actions (and a broker's first-login link) are audited.
 
 **Multi-admin implication:** admin is a proper multi-user role; every admin action is attributable via `AuditLog`. Tiered/limited-access admin permissions are a *later* refinement, not MVP.
 
