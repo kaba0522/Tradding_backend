@@ -4,7 +4,7 @@ const { parsePagination, buildMeta } = require('../lib/pagination');
 
 async function create(req, res, next) {
   try {
-    const listing = await listingService.createListing(req.user.id, req.body);
+    const listing = await listingService.createListingForRequester(req.user, req.body);
     sendSuccess(res, 201, listing);
   } catch (err) {
     next(err);

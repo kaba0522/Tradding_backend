@@ -115,18 +115,82 @@ async function getOwnerDefaultPaymentTerms(userId) {
 // doesn't specify one, the owner's profile default is copied in; if neither
 // exists the write is rejected. 0 is a valid value (immediate payment), so
 // this must compare against null, never use truthiness.
-function resolvePaymentTerms(listingValue, userDefault) {
+// byAdmin: the profile in question is the seller's, not the admin's — say so.
+function resolvePaymentTerms(listingValue, userDefault, byAdmin = false) {
   const resolved = listingValue ?? userDefault ?? null;
   if (resolved === null) {
     throw new AppError(
-      'paymentTerms is required: set it on the listing or set default payment terms in your profile',
+      byAdmin
+        ? 'paymentTerms is required: this seller has no default payment terms — enter payment terms for this listing'
+        : 'paymentTerms is required: set it on the listing or set default payment terms in your profile',
       400
     );
   }
   return resolved;
 }
 
-async function createListing(userId, body) {
+function parseSide(side) {
+  if (!VALID_SIDES.includes(side)) {
+    throw new AppError(`side must be one of: ${VALID_SIDES.join(', ')}`, 400);
+  }
+  return side;
+}
+
+// Who a new listing belongs to. A seller/buyer always creates for themselves. An admin
+// never owns listings: they create on behalf of a seller/buyer and must name them via
+// ownerUserId. Used by POST /listings and both Excel bulk steps, so the same checks
+// run everywhere — including again on bulk-confirm (the preview is never trusted).
+async function resolveListingOwner(requestingUser, ownerUserId, side) {
+  const isAdmin = requestingUser.roles.includes('admin');
+  const given = ownerUserId !== undefined && ownerUserId !== null && ownerUserId !== '';
+
+  if (!given) {
+    if (isAdmin) {
+      throw new AppError('ownerUserId is required — select the seller/buyer to create this listing for', 400);
+    }
+    return { ownerId: requestingUser.id, byAdmin: false };
+  }
+
+  validateUuid(ownerUserId, 'ownerUserId');
+  if (!isAdmin) {
+    if (ownerUserId === requestingUser.id) {
+      return { ownerId: requestingUser.id, byAdmin: false };
+    }
+    throw new AppError('Only an admin can create listings for another user', 403);
+  }
+  if (ownerUserId === requestingUser.id) {
+    throw new AppError('An admin cannot own listings — select the seller/buyer to create this listing for', 400);
+  }
+
+  const owner = await prisma.appUser.findUnique({
+    where: { id: ownerUserId },
+    select: { id: true, status: true, roles: true },
+  });
+  if (!owner) {
+    throw new AppError('User not found', 404);
+  }
+  if (owner.status !== 'active') {
+    throw new AppError('This user is not active', 400);
+  }
+  const requiredRole = side === 'SELL' ? 'seller' : 'buyer';
+  if (!owner.roles.includes(requiredRole)) {
+    throw new AppError(`This user is not a ${requiredRole}`, 400);
+  }
+  return { ownerId: owner.id, byAdmin: true };
+}
+
+// POST /listings: resolves the owner (self, or the seller/buyer an admin names),
+// creates the listing and, when an admin created it for someone, audits it.
+async function createListingForRequester(requestingUser, body) {
+  const side = parseSide(body.side);
+  const { ownerId, byAdmin } = await resolveListingOwner(requestingUser, body.ownerUserId, side);
+  return createListing(ownerId, body, { adminActorId: byAdmin ? requestingUser.id : null });
+}
+
+// adminActorId: set when an admin creates the listing on someone's behalf — the
+// listing is still owned by userId; the admin is recorded in the AuditLog.
+async function createListing(userId, body, { adminActorId = null } = {}) {
+  const byAdmin = adminActorId !== null;
   const input = validateListingCreateInput(body);
   const commodity = await fetchCategoryAndCommodity(input.categoryId, input.commodityId);
   await fetchQuality(input.categoryId, input.qualityId);
@@ -134,7 +198,7 @@ async function createListing(userId, body) {
   let paymentTerms = null;
   if (input.side === 'SELL') {
     const userDefault = input.paymentTerms === null ? await getOwnerDefaultPaymentTerms(userId) : null;
-    paymentTerms = resolvePaymentTerms(input.paymentTerms, userDefault);
+    paymentTerms = resolvePaymentTerms(input.paymentTerms, userDefault, byAdmin);
   }
 
   // Only SELL listings carry a price (and therefore an expiry). A BUY requirement
@@ -187,11 +251,14 @@ async function createListing(userId, body) {
   } catch (err) {
     if (err.code === 'P2002') {
       throw new AppError(
-        'You already have a listing with this same category, commodity, weight and quality',
+        `${byAdmin ? 'This user already has' : 'You already have'} a listing with this same category, commodity, weight and quality`,
         409
       );
     }
     throw err;
+  }
+  if (byAdmin) {
+    await writeAdminListingAudit('LISTING_CREATED_BY_ADMIN', adminActorId, null, listing);
   }
   return serializeListing(listing);
 }
@@ -356,14 +423,15 @@ function resolveListingAccess(existing, userId, requestingUser) {
   throw new AppError('Forbidden', 403);
 }
 
+// before is null for a create (there was no listing yet).
 async function writeAdminListingAudit(action, actorUserId, before, after) {
   await prisma.auditLog.create({
     data: {
       actorUserId,
       action,
       entity: 'Listing',
-      entityId: before.id,
-      before: serializeListing(before),
+      entityId: (before || after).id,
+      ...(before ? { before: serializeListing(before) } : {}),
       after: serializeListing(after),
     },
   });
@@ -403,7 +471,7 @@ async function updateListing(id, userId, body, requestingUser) {
   if (existing.side === 'SELL') {
     if (patch.paymentTerms === null) {
       // Explicit "use my default" — must resolve, else reject.
-      patch.paymentTerms = resolvePaymentTerms(null, await getOwnerDefaultPaymentTerms(ownerId));
+      patch.paymentTerms = resolvePaymentTerms(null, await getOwnerDefaultPaymentTerms(ownerId), byAdmin);
     } else if (patch.paymentTerms === undefined && existing.paymentTerms === null) {
       // Legacy listing with no terms: self-heal from the profile default if there is
       // one, but never block an unrelated edit (e.g. a price change) if there isn't.
@@ -657,6 +725,7 @@ async function forceExpireListing(id, adminUserId) {
 
 module.exports = {
   createListing,
+  createListingForRequester,
   getListings,
   getListingById,
   updateListing,
@@ -669,4 +738,8 @@ module.exports = {
   fetchQuality,
   getOwnerDefaultPaymentTerms,
   resolvePaymentTerms,
+  parseSide,
+  resolveListingOwner,
+  writeAdminListingAudit,
+  LISTING_INCLUDE,
 };
